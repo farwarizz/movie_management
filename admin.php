@@ -1,1506 +1,1409 @@
 <?php
-session_start();
-include 'db_connect.php'; // Include your database connection file
+/**
+ * admin.php
+ * This is the main administration panel for the Movies Management System.
+ * It provides a consolidated dashboard for managing movies, cinemas, users,
+ * streaming platforms, streaming services, and viewing activity logs.
+ *
+ * FIXES:
+ * - Corrected user fetching and user type update logic to match
+ * the schema where user roles are defined by presence in 'viewer' or 'admin' tables.
+ * - ADDED: Functionality to add new users (including role assignment).
+ */
 
-// Check if user is logged in and is an Admin
-if (!isset($_SESSION['user_id'])) {
+session_start();
+require_once 'db_connect.php';
+
+// Check if user is logged in and is an admin
+if (!isset($_SESSION['user_id']) || !isset($_SESSION['user_type']) || $_SESSION['user_type'] !== 'admin') {
     header("Location: login.php");
     exit();
 }
 
-$user_id = $_SESSION['user_id'];
-
-// Verify if the logged-in user is an admin
-$stmt_admin_check = $conn->prepare("SELECT user_id FROM admin WHERE user_id = ?");
-$stmt_admin_check->bind_param("i", $user_id);
-$stmt_admin_check->execute();
-$result_admin_check = $stmt_admin_check->get_result();
-
-if ($result_admin_check->num_rows === 0) {
-    // Not an admin, redirect to viewer dashboard or deny access
-    header("Location: viewer.php"); // Or a more appropriate page
-    exit();
-}
-$stmt_admin_check->close();
-
-// Get admin's name for display
-$admin_name = 'Admin';
-$stmt_name = $conn->prepare("SELECT name FROM user WHERE user_id = ?");
-$stmt_name->bind_param("i", $user_id);
-$stmt_name->execute();
-$stmt_name->bind_result($admin_name);
-$stmt_name->fetch();
-$stmt_name->close();
-
-// --- Handle CRUD Operations ---
+$message = '';
+$active_tab = isset($_GET['tab']) ? $_GET['tab'] : 'movies'; // Default active tab
 
 // Function to sanitize input
-function sanitize($conn, $data) {
-    return mysqli_real_escape_string($conn, htmlspecialchars(strip_tags(trim($data))));
+function sanitize_input($conn, $data) {
+    if (is_array($data)) {
+        return array_map(function($value) use ($conn) {
+            return $conn->real_escape_string(htmlspecialchars(strip_tags($value)));
+        }, $data);
+    }
+    return $conn->real_escape_string(htmlspecialchars(strip_tags($data)));
 }
 
-// ----------------------------------------------------
-// Handle User Management Actions (Delete, Change Role)
-// ----------------------------------------------------
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
+// --- General Message Handling ---
+if (isset($_GET['message'])) {
+    $message = "<div class='bg-green-100 border border-green-400 text-green-700 px-4 py-3 rounded relative mb-4' role='alert'>" . htmlspecialchars($_GET['message']) . "</div>";
+}
+if (isset($_GET['error'])) {
+    $message = "<div class='bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded relative mb-4' role='alert'>" . htmlspecialchars($_GET['error']) . "</div>";
+}
+
+// --- Handle Form Submissions for Add/Update/Delete Operations ---
+
+if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['action'])) {
     $action = $_POST['action'];
 
-    if ($action === 'delete_user' && isset($_POST['user_id'])) {
-        $target_user_id = intval($_POST['user_id']);
-        if ($target_user_id == $_SESSION['user_id']) {
-            $_SESSION['message'] = "Error: You cannot delete your own admin account.";
-            $_SESSION['message_type'] = "danger";
+    // --- MOVIES Management ---
+    if ($action === 'add_movie') {
+        $title = sanitize_input($conn, $_POST['title']);
+        $genre = sanitize_input($conn, $_POST['genre']);
+        $release_date = sanitize_input($conn, $_POST['release_date']);
+        $language = sanitize_input($conn, $_POST['language']);
+        $duration = (int)$_POST['duration'];
+        $rating = (float)$_POST['rating'];
+
+        if (empty($title) || empty($genre) || empty($release_date) || empty($language) || empty($duration) || empty($rating)) {
+            $message = "<div class='bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded relative mb-4' role='alert'>All movie fields are required.</div>";
+            $active_tab = 'movies';
         } else {
-            // Delete from user table (cascades to viewer/admin tables)
-            $stmt = $conn->prepare("DELETE FROM user WHERE user_id = ?");
-            $stmt->bind_param("i", $target_user_id);
-            if ($stmt->execute()) {
-                $_SESSION['message'] = "User deleted successfully!";
-                $_SESSION['message_type'] = "success";
+            $stmt = $conn->prepare("INSERT INTO movies (title, genre, release_date, language, duration, rating) VALUES (?, ?, ?, ?, ?, ?)");
+            if ($stmt) {
+                $stmt->bind_param("ssssid", $title, $genre, $release_date, $language, $duration, $rating);
+                if ($stmt->execute()) {
+                    $message = "<div class='bg-green-100 border border-green-400 text-green-700 px-4 py-3 rounded relative mb-4' role='alert'>Movie added successfully!</div>";
+                } else {
+                    $message = "<div class='bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded relative mb-4' role='alert'>Error adding movie: " . $stmt->error . "</div>";
+                }
+                $stmt->close();
             } else {
-                $_SESSION['message'] = "Error deleting user: " . $stmt->error;
-                $_SESSION['message_type'] = "danger";
+                $message = "<div class='bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded relative mb-4' role='alert'>Database error: " . $conn->error . "</div>";
+            }
+            $active_tab = 'movies';
+        }
+    } elseif ($action === 'update_movie') {
+        $movie_id = (int)$_POST['movie_id'];
+        $title = sanitize_input($conn, $_POST['title']);
+        $genre = sanitize_input($conn, $_POST['genre']);
+        $release_date = sanitize_input($conn, $_POST['release_date']);
+        $language = sanitize_input($conn, $_POST['language']);
+        $duration = (int)$_POST['duration'];
+        $rating = (float)$_POST['rating'];
+
+        if (empty($title) || empty($genre) || empty($release_date) || empty($language) || empty($duration) || empty($rating)) {
+            $message = "<div class='bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded relative mb-4' role='alert'>All movie fields are required for update.</div>";
+            $active_tab = 'movies';
+        } else {
+            $stmt = $conn->prepare("UPDATE movies SET title = ?, genre = ?, release_date = ?, language = ?, duration = ?, rating = ? WHERE movie_id = ?");
+            if ($stmt) {
+                $stmt->bind_param("ssssidi", $title, $genre, $release_date, $language, $duration, $rating, $movie_id);
+                if ($stmt->execute()) {
+                    $message = "<div class='bg-green-100 border border-green-400 text-green-700 px-4 py-3 rounded relative mb-4' role='alert'>Movie updated successfully!</div>";
+                } else {
+                    $message = "<div class='bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded relative mb-4' role='alert'>Error updating movie: " . $stmt->error . "</div>";
+                }
+                $stmt->close();
+            } else {
+                $message = "<div class='bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded relative mb-4' role='alert'>Database error: " . $conn->error . "</div>";
+            }
+            $active_tab = 'movies';
+        }
+    } elseif ($action === 'delete_movie') {
+        $movie_id = (int)$_POST['movie_id'];
+        $stmt = $conn->prepare("DELETE FROM movies WHERE movie_id = ?");
+        if ($stmt) {
+            $stmt->bind_param("i", $movie_id);
+            if ($stmt->execute()) {
+                $message = "<div class='bg-green-100 border border-green-400 text-green-700 px-4 py-3 rounded relative mb-4' role='alert'>Movie deleted successfully!</div>";
+            } else {
+                $message = "<div class='bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded relative mb-4' role='alert'>Error deleting movie: " . $stmt->error . "</div>";
             }
             $stmt->close();
-        }
-    } elseif ($action === 'change_user_role' && isset($_POST['user_id'], $_POST['current_role'])) {
-        $target_user_id = intval($_POST['user_id']);
-        $current_role = sanitize($conn, $_POST['current_role']);
-
-        if ($target_user_id == $_SESSION['user_id']) {
-            $_SESSION['message'] = "Error: You cannot change your own role through this interface.";
-            $_SESSION['message_type'] = "danger";
         } else {
-            if ($current_role === 'Admin') {
-                // Change to Viewer: Delete from admin table
-                $stmt = $conn->prepare("DELETE FROM admin WHERE user_id = ?");
-                $stmt->bind_param("i", $target_user_id);
+            $message = "<div class='bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded relative mb-4' role='alert'>Database error: " . $conn->error . "</div>";
+        }
+        $active_tab = 'movies';
+    }
+
+    // --- CINEMAS Management ---
+    elseif ($action === 'add_cinema') {
+        $name = sanitize_input($conn, $_POST['name']);
+        $location = sanitize_input($conn, $_POST['location']);
+        $type_id = (int)$_POST['type_id'];
+
+        if (empty($name) || empty($location) || empty($type_id)) {
+            $message = "<div class='bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded relative mb-4' role='alert'>All cinema fields are required.</div>";
+            $active_tab = 'cinemas';
+        } else {
+            $stmt = $conn->prepare("INSERT INTO cinema (name, location, type_id) VALUES (?, ?, ?)");
+            if ($stmt) {
+                $stmt->bind_param("ssi", $name, $location, $type_id);
                 if ($stmt->execute()) {
-                    $_SESSION['message'] = "User role changed to Viewer.";
-                    $_SESSION['message_type'] = "success";
+                    $message = "<div class='bg-green-100 border border-green-400 text-green-700 px-4 py-3 rounded relative mb-4' role='alert'>Cinema added successfully!</div>";
                 } else {
-                    $_SESSION['message'] = "Error changing role: " . $stmt->error;
-                    $_SESSION['message_type'] = "danger";
+                    $message = "<div class='bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded relative mb-4' role='alert'>Error adding cinema: " . $stmt->error . "</div>";
                 }
                 $stmt->close();
-            } elseif ($current_role === 'Viewer') {
-                // Change to Admin: Insert into admin table
-                $stmt = $conn->prepare("INSERT INTO admin (user_id) VALUES (?)");
-                $stmt->bind_param("i", $target_user_id);
+            } else {
+                $message = "<div class='bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded relative mb-4' role='alert'>Database error: " . $conn->error . "</div>";
+            }
+            $active_tab = 'cinemas';
+        }
+    } elseif ($action === 'update_cinema') {
+        $cinema_id = (int)$_POST['cinema_id'];
+        $name = sanitize_input($conn, $_POST['name']);
+        $location = sanitize_input($conn, $_POST['location']);
+        $type_id = (int)$_POST['type_id'];
+
+        if (empty($name) || empty($location) || empty($type_id)) {
+            $message = "<div class='bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded relative mb-4' role='alert'>All cinema fields are required for update.</div>";
+            $active_tab = 'cinemas';
+        } else {
+            $stmt = $conn->prepare("UPDATE cinema SET name = ?, location = ?, type_id = ? WHERE cinema_id = ?");
+            if ($stmt) {
+                $stmt->bind_param("ssii", $name, $location, $type_id, $cinema_id);
                 if ($stmt->execute()) {
-                    $_SESSION['message'] = "User role changed to Admin.";
-                    $_SESSION['message_type'] = "success";
+                    $message = "<div class='bg-green-100 border border-green-400 text-green-700 px-4 py-3 rounded relative mb-4' role='alert'>Cinema updated successfully!</div>";
                 } else {
-                    $_SESSION['message'] = "Error changing role: " . $stmt->error;
-                    $_SESSION['message_type'] = "danger";
+                    $message = "<div class='bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded relative mb-4' role='alert'>Error updating cinema: " . $stmt->error . "</div>";
                 }
                 $stmt->close();
+            } else {
+                $message = "<div class='bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded relative mb-4' role='alert'>Database error: " . $conn->error . "</div>";
+            }
+            $active_tab = 'cinemas';
+        }
+    } elseif ($action === 'delete_cinema') {
+        $cinema_id = (int)$_POST['cinema_id'];
+        $stmt = $conn->prepare("DELETE FROM cinema WHERE cinema_id = ?");
+        if ($stmt) {
+            $stmt->bind_param("i", $cinema_id);
+            if ($stmt->execute()) {
+                $message = "<div class='bg-green-100 border border-green-400 text-green-700 px-4 py-3 rounded relative mb-4' role='alert'>Cinema deleted successfully!</div>";
+            } else {
+                $message = "<div class='bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded relative mb-4' role='alert'>Error deleting cinema: " . $stmt->error . "</div>";
+            }
+            $stmt->close();
+        } else {
+            $message = "<div class='bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded relative mb-4' role='alert'>Database error: " . $conn->error . "</div>";
+        }
+        $active_tab = 'cinemas';
+    }
+
+    // --- USERS Management (Add, Role Change & Delete) ---
+    elseif ($action === 'add_user') {
+        $name = sanitize_input($conn, $_POST['name']);
+        $age = (int)$_POST['age'];
+        $email = sanitize_input($conn, $_POST['email']);
+        $password = $_POST['password']; // Password will be hashed
+        $preference = sanitize_input($conn, $_POST['preference']);
+        $user_role_to_add = sanitize_input($conn, $_POST['user_role']);
+
+        if (empty($name) || empty($email) || empty($password) || empty($preference) || empty($user_role_to_add)) {
+            $message = "<div class='bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded relative mb-4' role='alert'>All user fields are required.</div>";
+            $active_tab = 'users';
+        } else {
+            // Check if email already exists
+            $check_email_stmt = $conn->prepare("SELECT user_id FROM user WHERE email = ?");
+            $check_email_stmt->bind_param("s", $email);
+            $check_email_stmt->execute();
+            $check_email_result = $check_email_stmt->get_result();
+            if ($check_email_result->num_rows > 0) {
+                $message = "<div class='bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded relative mb-4' role='alert'>User with this email already exists.</div>";
+                $active_tab = 'users';
+                $check_email_stmt->close();
+            } else {
+                $check_email_stmt->close();
+                $hashed_password = password_hash($password, PASSWORD_DEFAULT);
+
+                $conn->begin_transaction();
+                try {
+                    $stmt_user = $conn->prepare("INSERT INTO user (name, age, email, password, preference) VALUES (?, ?, ?, ?, ?)");
+                    if (!$stmt_user) {
+                        throw new mysqli_sql_exception("Prepare failed: " . $conn->error);
+                    }
+                    $stmt_user->bind_param("sisss", $name, $age, $email, $hashed_password, $preference);
+                    $stmt_user->execute();
+                    $new_user_id = $conn->insert_id;
+                    $stmt_user->close();
+
+                    if ($user_role_to_add === 'admin') {
+                        $stmt_role = $conn->prepare("INSERT INTO admin (user_id) VALUES (?)");
+                    } else { // default to viewer
+                        $stmt_role = $conn->prepare("INSERT INTO viewer (user_id) VALUES (?)");
+                    }
+                    if (!$stmt_role) {
+                        throw new mysqli_sql_exception("Prepare role failed: " . $conn->error);
+                    }
+                    $stmt_role->bind_param("i", $new_user_id);
+                    $stmt_role->execute();
+                    $stmt_role->close();
+
+                    $conn->commit();
+                    $message = "<div class='bg-green-100 border border-green-400 text-green-700 px-4 py-3 rounded relative mb-4' role='alert'>User added successfully with role '" . htmlspecialchars($user_role_to_add) . "'!</div>";
+                } catch (mysqli_sql_exception $e) {
+                    $conn->rollback();
+                    $message = "<div class='bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded relative mb-4' role='alert'>Error adding user: " . $e->getMessage() . "</div>";
+                }
+                $active_tab = 'users';
             }
         }
+    } elseif ($action === 'update_user_role') {
+        $user_id_to_modify = (int)$_POST['user_id'];
+        $new_role = sanitize_input($conn, $_POST['new_role']);
+
+        if ($user_id_to_modify === $_SESSION['user_id']) { // Prevent admin from changing their own type
+            $message = "<div class='bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded relative mb-4' role='alert'>You cannot change your own user role.</div>";
+        } else {
+            // Get current role of the user being modified
+            $current_role_stmt = $conn->prepare("SELECT CASE WHEN a.user_id IS NOT NULL THEN 'admin' ELSE 'viewer' END AS user_role
+                                                FROM user u LEFT JOIN admin a ON u.user_id = a.user_id WHERE u.user_id = ?");
+            $current_role_stmt->bind_param("i", $user_id_to_modify);
+            $current_role_stmt->execute();
+            $current_role_result = $current_role_stmt->get_result();
+            $current_role_row = $current_role_result->fetch_assoc();
+            $current_role = $current_role_row['user_role'];
+            $current_role_stmt->close();
+
+            // Only proceed if role is actually changing
+            if ($current_role !== $new_role) {
+                $conn->begin_transaction();
+                try {
+                    if ($new_role === 'admin') {
+                        // Change from viewer to admin
+                        $stmt_delete_viewer = $conn->prepare("DELETE FROM viewer WHERE user_id = ?");
+                        $stmt_delete_viewer->bind_param("i", $user_id_to_modify);
+                        $stmt_delete_viewer->execute();
+                        $stmt_delete_viewer->close();
+
+                        $stmt_insert_admin = $conn->prepare("INSERT INTO admin (user_id) VALUES (?)");
+                        $stmt_insert_admin->bind_param("i", $user_id_to_modify);
+                        $stmt_insert_admin->execute();
+                        $stmt_insert_admin->close();
+                    } elseif ($new_role === 'viewer') {
+                        // Change from admin to viewer
+                        $stmt_delete_admin = $conn->prepare("DELETE FROM admin WHERE user_id = ?");
+                        $stmt_delete_admin->bind_param("i", $user_id_to_modify);
+                        $stmt_delete_admin->execute();
+                        $stmt_delete_admin->close();
+
+                        $stmt_insert_viewer = $conn->prepare("INSERT INTO viewer (user_id) VALUES (?)");
+                        $stmt_insert_viewer->bind_param("i", $user_id_to_modify);
+                        $stmt_insert_viewer->execute();
+                        $stmt_insert_viewer->close();
+                    }
+                    $conn->commit();
+                    $message = "<div class='bg-green-100 border border-green-400 text-green-700 px-4 py-3 rounded relative mb-4' role='alert'>User role updated successfully!</div>";
+                } catch (mysqli_sql_exception $e) {
+                    $conn->rollback();
+                    $message = "<div class='bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded relative mb-4' role='alert'>Error updating user role: " . $e->getMessage() . "</div>";
+                }
+            } else {
+                $message = "<div class='bg-yellow-100 border border-yellow-400 text-yellow-700 px-4 py-3 rounded relative mb-4' role='alert'>User already has the selected role. No change made.</div>";
+            }
+        }
+        $active_tab = 'users';
+    } elseif ($action === 'delete_user') {
+        $user_id = (int)$_POST['user_id'];
+        if ($user_id === $_SESSION['user_id']) { // Prevent admin from deleting their own account
+            $message = "<div class='bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded relative mb-4' role='alert'>You cannot delete your own admin account.</div>";
+        } else {
+            // Deleting from 'user' table will cascade delete in 'viewer'/'admin' due to FK ON DELETE CASCADE
+            $stmt = $conn->prepare("DELETE FROM user WHERE user_id = ?");
+            if ($stmt) {
+                $stmt->bind_param("i", $user_id);
+                if ($stmt->execute()) {
+                    $message = "<div class='bg-green-100 border border-green-400 text-green-700 px-4 py-3 rounded relative mb-4' role='alert'>User deleted successfully!</div>";
+                } else {
+                    $message = "<div class='bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded relative mb-4' role='alert'>Error deleting user: " . $stmt->error . "</div>";
+                }
+                $stmt->close();
+            } else {
+                $message = "<div class='bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded relative mb-4' role='alert'>Database error: " . $conn->error . "</div>";
+            }
+        }
+        $active_tab = 'users';
     }
 
-    // Redirect to prevent form resubmission
-    header("Location: admin.php?tab=users");
-    exit();
-}
+    // --- STREAMING PLATFORMS Management ---
+    elseif ($action === 'add_platform') {
+        $platform_name = sanitize_input($conn, $_POST['platform_name']);
+        $website = sanitize_input($conn, $_POST['website']);
 
-
-// ----------------------------------------------------
-// Handle Movie CRUD (Add, Update, Delete)
-// ----------------------------------------------------
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['movie_action'])) {
-    $movie_action = $_POST['movie_action'];
-
-    if ($movie_action === 'add') {
-        $title = sanitize($conn, $_POST['title']);
-        $genre = sanitize($conn, $_POST['genre']);
-        $release_date = sanitize($conn, $_POST['release_date']);
-        $language = sanitize($conn, $_POST['language']);
-        $duration = intval($_POST['duration']);
-        $rating = floatval($_POST['rating']);
-
-        $stmt = $conn->prepare("INSERT INTO movies (title, genre, release_date, language, duration, rating) VALUES (?, ?, ?, ?, ?, ?)");
-        $stmt->bind_param("ssssid", $title, $genre, $release_date, $language, $duration, $rating);
-        if ($stmt->execute()) {
-            $_SESSION['message'] = "Movie added successfully!";
-            $_SESSION['message_type'] = "success";
+        if (empty($platform_name)) {
+            $message = "<div class='bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded relative mb-4' role='alert'>Platform name is required.</div>";
+            $active_tab = 'platforms';
         } else {
-            $_SESSION['message'] = "Error adding movie: " . $stmt->error;
-            $_SESSION['message_type'] = "danger";
+            $stmt = $conn->prepare("INSERT INTO streaming_platform (platform_name, website) VALUES (?, ?)");
+            if ($stmt) {
+                $stmt->bind_param("ss", $platform_name, $website);
+                if ($stmt->execute()) {
+                    $message = "<div class='bg-green-100 border border-green-400 text-green-700 px-4 py-3 rounded relative mb-4' role='alert'>Streaming Platform added successfully!</div>";
+                } else {
+                    $message = "<div class='bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded relative mb-4' role='alert'>Error adding platform: " . $stmt->error . "</div>";
+                }
+                $stmt->close();
+            } else {
+                $message = "<div class='bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded relative mb-4' role='alert'>Database error: " . $conn->error . "</div>";
+            }
+            $active_tab = 'platforms';
         }
-        $stmt->close();
-    } elseif ($movie_action === 'update' && isset($_POST['movie_id'])) {
-        $movie_id = intval($_POST['movie_id']);
-        $title = sanitize($conn, $_POST['title']);
-        $genre = sanitize($conn, $_POST['genre']);
-        $release_date = sanitize($conn, $_POST['release_date']);
-        $language = sanitize($conn, $_POST['language']);
-        $duration = intval($_POST['duration']);
-        $rating = floatval($_POST['rating']);
+    } elseif ($action === 'update_platform') {
+        $platform_id = (int)$_POST['platform_id'];
+        $platform_name = sanitize_input($conn, $_POST['platform_name']);
+        $website = sanitize_input($conn, $_POST['website']);
 
-        $stmt = $conn->prepare("UPDATE movies SET title=?, genre=?, release_date=?, language=?, duration=?, rating=? WHERE movie_id=?");
-        $stmt->bind_param("ssssidi", $title, $genre, $release_date, $language, $duration, $rating, $movie_id);
-        if ($stmt->execute()) {
-            $_SESSION['message'] = "Movie updated successfully!";
-            $_SESSION['message_type'] = "success";
+        if (empty($platform_name)) {
+            $message = "<div class='bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded relative mb-4' role='alert'>Platform name is required for update.</div>";
+            $active_tab = 'platforms';
         } else {
-            $_SESSION['message'] = "Error updating movie: " . $stmt->error;
-            $_SESSION['message_type'] = "danger";
+            $stmt = $conn->prepare("UPDATE streaming_platform SET platform_name = ?, website = ? WHERE platform_id = ?");
+            if ($stmt) {
+                $stmt->bind_param("ssi", $platform_name, $website, $platform_id);
+                if ($stmt->execute()) {
+                    $message = "<div class='bg-green-100 border border-green-400 text-green-700 px-4 py-3 rounded relative mb-4' role='alert'>Streaming Platform updated successfully!</div>";
+                } else {
+                    $message = "<div class='bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded relative mb-4' role='alert'>Error updating platform: " . $stmt->error . "</div>";
+                }
+                $stmt->close();
+            } else {
+                $message = "<div class='bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded relative mb-4' role='alert'>Database error: " . $conn->error . "</div>";
+            }
+            $active_tab = 'platforms';
         }
-        $stmt->close();
-    } elseif ($movie_action === 'delete' && isset($_POST['movie_id'])) {
-        $movie_id = intval($_POST['movie_id']);
-        $stmt = $conn->prepare("DELETE FROM movies WHERE movie_id = ?");
-        $stmt->bind_param("i", $movie_id);
-        if ($stmt->execute()) {
-            $_SESSION['message'] = "Movie deleted successfully!";
-            $_SESSION['message_type'] = "success";
-        } else {
-            $_SESSION['message'] = "Error deleting movie: " . $stmt->error;
-            $_SESSION['message_type'] = "danger";
-        }
-        $stmt->close();
-    }
-    header("Location: admin.php?tab=movies");
-    exit();
-}
-
-// ----------------------------------------------------
-// Handle Cinema CRUD (Add, Update, Delete)
-// ----------------------------------------------------
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['cinema_action'])) {
-    $cinema_action = $_POST['cinema_action'];
-
-    if ($cinema_action === 'add') {
-        $name = sanitize($conn, $_POST['name']);
-        $location = sanitize($conn, $_POST['location']);
-        $type_id = intval($_POST['type_id']);
-
-        $stmt = $conn->prepare("INSERT INTO cinema (name, location, type_id) VALUES (?, ?, ?)");
-        $stmt->bind_param("ssi", $name, $location, $type_id);
-        if ($stmt->execute()) {
-            $_SESSION['message'] = "Cinema added successfully!";
-            $_SESSION['message_type'] = "success";
-        } else {
-            $_SESSION['message'] = "Error adding cinema: " . $stmt->error;
-            $_SESSION['message_type'] = "danger";
-        }
-        $stmt->close();
-    } elseif ($cinema_action === 'update' && isset($_POST['cinema_id'])) {
-        $cinema_id = intval($_POST['cinema_id']);
-        $name = sanitize($conn, $_POST['name']);
-        $location = sanitize($conn, $_POST['location']);
-        $type_id = intval($_POST['type_id']);
-
-        $stmt = $conn->prepare("UPDATE cinema SET name=?, location=?, type_id=? WHERE cinema_id=?");
-        $stmt->bind_param("ssii", $name, $location, $type_id, $cinema_id);
-        if ($stmt->execute()) {
-            $_SESSION['message'] = "Cinema updated successfully!";
-            $_SESSION['message_type'] = "success";
-        } else {
-            $_SESSION['message'] = "Error updating cinema: " . $stmt->error;
-            $_SESSION['message_type'] = "danger";
-        }
-        $stmt->close();
-    } elseif ($cinema_action === 'delete' && isset($_POST['cinema_id'])) {
-        $cinema_id = intval($_POST['cinema_id']);
-        $stmt = $conn->prepare("DELETE FROM cinema WHERE cinema_id = ?");
-        $stmt->bind_param("i", $cinema_id);
-        if ($stmt->execute()) {
-            $_SESSION['message'] = "Cinema deleted successfully!";
-            $_SESSION['message_type'] = "success";
-        } else {
-            $_SESSION['message'] = "Error deleting cinema: " . $stmt->error;
-            $_SESSION['message_type'] = "danger";
-        }
-        $stmt->close();
-    }
-    header("Location: admin.php?tab=cinemas");
-    exit();
-}
-
-// ----------------------------------------------------
-// Handle Cinema Type CRUD (Add, Update, Delete)
-// ----------------------------------------------------
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['cinema_type_action'])) {
-    $cinema_type_action = $_POST['cinema_type_action'];
-
-    if ($cinema_type_action === 'add') {
-        $type_name = sanitize($conn, $_POST['type_name']);
-        $price = floatval($_POST['price']);
-
-        $stmt = $conn->prepare("INSERT INTO cinema_type (type_name, price) VALUES (?, ?)");
-        $stmt->bind_param("sd", $type_name, $price);
-        if ($stmt->execute()) {
-            $_SESSION['message'] = "Cinema Type added successfully!";
-            $_SESSION['message_type'] = "success";
-        } else {
-            $_SESSION['message'] = "Error adding cinema type: " . $stmt->error;
-            $_SESSION['message_type'] = "danger";
-        }
-        $stmt->close();
-    } elseif ($cinema_type_action === 'update' && isset($_POST['type_id'])) {
-        $type_id = intval($_POST['type_id']);
-        $type_name = sanitize($conn, $_POST['type_name']);
-        $price = floatval($_POST['price']);
-
-        $stmt = $conn->prepare("UPDATE cinema_type SET type_name=?, price=? WHERE type_id=?");
-        $stmt->bind_param("sdi", $type_name, $price, $type_id);
-        if ($stmt->execute()) {
-            $_SESSION['message'] = "Cinema Type updated successfully!";
-            $_SESSION['message_type'] = "success";
-        } else {
-            $_SESSION['message'] = "Error updating cinema type: " . $stmt->error;
-            $_SESSION['message_type'] = "danger";
-        }
-        $stmt->close();
-    } elseif ($cinema_type_action === 'delete' && isset($_POST['type_id'])) {
-        $type_id = intval($_POST['type_id']);
-        $stmt = $conn->prepare("DELETE FROM cinema_type WHERE type_id = ?");
-        $stmt->bind_param("i", $type_id);
-        if ($stmt->execute()) {
-            $_SESSION['message'] = "Cinema Type deleted successfully!";
-            $_SESSION['message_type'] = "success";
-        } else {
-            $_SESSION['message'] = "Error deleting cinema type: " . $stmt->error;
-            $_SESSION['message_type'] = "danger";
-        }
-        $stmt->close();
-    }
-    header("Location: admin.php?tab=cinema_types");
-    exit();
-}
-
-// ----------------------------------------------------
-// Handle Streaming Platform CRUD (Add, Update, Delete)
-// ----------------------------------------------------
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['platform_action'])) {
-    $platform_action = $_POST['platform_action'];
-
-    if ($platform_action === 'add') {
-        $platform_name = sanitize($conn, $_POST['platform_name']);
-        $website = sanitize($conn, $_POST['website']);
-
-        $stmt = $conn->prepare("INSERT INTO streaming_platform (platform_name, website) VALUES (?, ?)");
-        $stmt->bind_param("ss", $platform_name, $website);
-        if ($stmt->execute()) {
-            $_SESSION['message'] = "Streaming Platform added successfully!";
-            $_SESSION['message_type'] = "success";
-        } else {
-            $_SESSION['message'] = "Error adding platform: " . $stmt->error;
-            $_SESSION['message_type'] = "danger";
-        }
-        $stmt->close();
-    } elseif ($platform_action === 'update' && isset($_POST['platform_id'])) {
-        $platform_id = intval($_POST['platform_id']);
-        $platform_name = sanitize($conn, $_POST['platform_name']);
-        $website = sanitize($conn, $_POST['website']);
-
-        $stmt = $conn->prepare("UPDATE streaming_platform SET platform_name=?, website=? WHERE platform_id=?");
-        $stmt->bind_param("ssi", $platform_name, $website, $platform_id);
-        if ($stmt->execute()) {
-            $_SESSION['message'] = "Streaming Platform updated successfully!";
-            $_SESSION['message_type'] = "success";
-        } else {
-            $_SESSION['message'] = "Error updating platform: " . $stmt->error;
-            $_SESSION['message_type'] = "danger";
-        }
-        $stmt->close();
-    } elseif ($platform_action === 'delete' && isset($_POST['platform_id'])) {
-        $platform_id = intval($_POST['platform_id']);
+    } elseif ($action === 'delete_platform') {
+        $platform_id = (int)$_POST['platform_id'];
         $stmt = $conn->prepare("DELETE FROM streaming_platform WHERE platform_id = ?");
-        $stmt->bind_param("i", $platform_id);
-        if ($stmt->execute()) {
-            $_SESSION['message'] = "Streaming Platform deleted successfully!";
-            $_SESSION['message_type'] = "success";
+        if ($stmt) {
+            $stmt->bind_param("i", $platform_id);
+            if ($stmt->execute()) {
+                $message = "<div class='bg-green-100 border border-green-400 text-green-700 px-4 py-3 rounded relative mb-4' role='alert'>Streaming Platform deleted successfully!</div>";
+            } else {
+                $message = "<div class='bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded relative mb-4' role='alert'>Error deleting platform: " . $stmt->error . "</div>";
+            }
+            $stmt->close();
         } else {
-            $_SESSION['message'] = "Error deleting platform: " . $stmt->error;
-            $_SESSION['message_type'] = "danger";
+            $message = "<div class='bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded relative mb-4' role='alert'>Database error: " . $conn->error . "</div>";
         }
-        $stmt->close();
+        $active_tab = 'platforms';
     }
-    header("Location: admin.php?tab=platforms");
-    exit();
-}
 
-// ----------------------------------------------------
-// Handle Streaming Services CRUD (Add, Update, Delete)
-// ----------------------------------------------------
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['streaming_service_action'])) {
-    $streaming_service_action = $_POST['streaming_service_action'];
+    // --- STREAMING SERVICES (linking movies to platforms with prices) Management ---
+    elseif ($action === 'add_streaming_service') {
+        $movie_id = (int)$_POST['movie_id'];
+        $platform_id = (int)$_POST['platform_id'];
+        $price_720p = (float)$_POST['price_720p'];
+        $price_1080p = (float)$_POST['price_1080p'];
+        $price_4k = (float)$_POST['price_4k'];
 
-    if ($streaming_service_action === 'add') {
-        $movie_id = intval($_POST['movie_id']);
-        $platform_id = intval($_POST['platform_id']);
-        $price_720p = floatval($_POST['price_720p']);
-        $price_1080p = floatval($_POST['price_1080p']);
-        $price_4k = floatval($_POST['price_4k']);
-
-        $stmt = $conn->prepare("INSERT INTO streaming_services (movie_id, platform_id, price_720p, price_1080p, price_4k) VALUES (?, ?, ?, ?, ?)");
-        $stmt->bind_param("iiddd", $movie_id, $platform_id, $price_720p, $price_1080p, $price_4k);
-        if ($stmt->execute()) {
-            $_SESSION['message'] = "Streaming Service link added successfully!";
-            $_SESSION['message_type'] = "success";
+        if (empty($movie_id) || empty($platform_id)) {
+            $message = "<div class='bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded relative mb-4' role='alert'>Movie and Platform are required.</div>";
+            $active_tab = 'streaming_services';
         } else {
-            $_SESSION['message'] = "Error adding streaming service link: " . $stmt->error;
-            $_SESSION['message_type'] = "danger";
-        }
-        $stmt->close();
-    } elseif ($streaming_service_action === 'update' && isset($_POST['streaming_id'])) {
-        $streaming_id = intval($_POST['streaming_id']);
-        $movie_id = intval($_POST['movie_id']); // Can technically be updated if allowed
-        $platform_id = intval($_POST['platform_id']); // Can technically be updated if allowed
-        $price_720p = floatval($_POST['price_720p']);
-        $price_1080p = floatval($_POST['price_1080p']);
-        $price_4k = floatval($_POST['price_4k']);
+            // Check for duplicate entry
+            $check_stmt = $conn->prepare("SELECT COUNT(*) FROM streaming_services WHERE movie_id = ? AND platform_id = ?");
+            $check_stmt->bind_param("ii", $movie_id, $platform_id);
+            $check_stmt->execute();
+            $check_result = $check_stmt->get_result()->fetch_row()[0];
+            $check_stmt->close();
 
-        $stmt = $conn->prepare("UPDATE streaming_services SET movie_id=?, platform_id=?, price_720p=?, price_1080p=?, price_4k=? WHERE streaming_id=?");
-        $stmt->bind_param("iidddi", $movie_id, $platform_id, $price_720p, $price_1080p, $price_4k, $streaming_id);
-        if ($stmt->execute()) {
-            $_SESSION['message'] = "Streaming Service link updated successfully!";
-            $_SESSION['message_type'] = "success";
-        } else {
-            $_SESSION['message'] = "Error updating streaming service link: " . $stmt->error;
-            $_SESSION['message_type'] = "danger";
+            if ($check_result > 0) {
+                $message = "<div class='bg-yellow-100 border border-yellow-400 text-yellow-700 px-4 py-3 rounded relative mb-4' role='alert'>This movie is already linked to this platform. Consider updating instead.</div>";
+            } else {
+                $stmt = $conn->prepare("INSERT INTO streaming_services (movie_id, platform_id, price_720p, price_1080p, price_4k) VALUES (?, ?, ?, ?, ?)");
+                if ($stmt) {
+                    $stmt->bind_param("iiddd", $movie_id, $platform_id, $price_720p, $price_1080p, $price_4k);
+                    if ($stmt->execute()) {
+                        $message = "<div class='bg-green-100 border border-green-400 text-green-700 px-4 py-3 rounded relative mb-4' role='alert'>Streaming service link added successfully!</div>";
+                    } else {
+                        $message = "<div class='bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded relative mb-4' role='alert'>Error adding service link: " . $stmt->error . "</div>";
+                    }
+                    $stmt->close();
+                } else {
+                    $message = "<div class='bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded relative mb-4' role='alert'>Database error: " . $conn->error . "</div>";
+                }
+            }
+            $active_tab = 'streaming_services';
         }
-        $stmt->close();
-    } elseif ($streaming_service_action === 'delete' && isset($_POST['streaming_id'])) {
-        $streaming_id = intval($_POST['streaming_id']);
+    } elseif ($action === 'update_streaming_service') {
+        $streaming_id = (int)$_POST['streaming_id'];
+        $movie_id = (int)$_POST['movie_id'];
+        $platform_id = (int)$_POST['platform_id'];
+        $price_720p = (float)$_POST['price_720p'];
+        $price_1080p = (float)$_POST['price_1080p'];
+        $price_4k = (float)$_POST['price_4k'];
+
+        if (empty($movie_id) || empty($platform_id)) {
+            $message = "<div class='bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded relative mb-4' role='alert'>Movie and Platform are required for update.</div>";
+            $active_tab = 'streaming_services';
+        } else {
+            // Check for duplicate entry, excluding the current record being updated
+            $check_stmt = $conn->prepare("SELECT COUNT(*) FROM streaming_services WHERE movie_id = ? AND platform_id = ? AND streaming_id != ?");
+            $check_stmt->bind_param("iii", $movie_id, $platform_id, $streaming_id);
+            $check_stmt->execute();
+            $check_result = $check_stmt->get_result()->fetch_row()[0];
+            $check_stmt->close();
+
+            if ($check_result > 0) {
+                $message = "<div class='bg-yellow-100 border border-yellow-400 text-yellow-700 px-4 py-3 rounded relative mb-4' role='alert'>This movie is already associated with this platform.</div>";
+            } else {
+                $stmt = $conn->prepare("UPDATE streaming_services SET movie_id = ?, platform_id = ?, price_720p = ?, price_1080p = ?, price_4k = ? WHERE streaming_id = ?");
+                if ($stmt) {
+                    $stmt->bind_param("iidddi", $movie_id, $platform_id, $price_720p, $price_1080p, $price_4k, $streaming_id);
+                    if ($stmt->execute()) {
+                        $message = "<div class='bg-green-100 border border-green-400 text-green-700 px-4 py-3 rounded relative mb-4' role='alert'>Streaming service link updated successfully!</div>";
+                    } else {
+                        $message = "<div class='bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded relative mb-4' role='alert'>Error updating service link: " . $stmt->error . "</div>";
+                    }
+                    $stmt->close();
+                } else {
+                    $message = "<div class='bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded relative mb-4' role='alert'>Database error: " . $conn->error . "</div>";
+                }
+            }
+            $active_tab = 'streaming_services';
+        }
+    } elseif ($action === 'delete_streaming_service') {
+        $streaming_id = (int)$_POST['streaming_id'];
         $stmt = $conn->prepare("DELETE FROM streaming_services WHERE streaming_id = ?");
-        $stmt->bind_param("i", $streaming_id);
-        if ($stmt->execute()) {
-            $_SESSION['message'] = "Streaming Service link deleted successfully!";
-            $_SESSION['message_type'] = "success";
+        if ($stmt) {
+            $stmt->bind_param("i", $streaming_id);
+            if ($stmt->execute()) {
+                $message = "<div class='bg-green-100 border border-green-400 text-green-700 px-4 py-3 rounded relative mb-4' role='alert'>Streaming service link deleted successfully!</div>";
+            } else {
+                $message = "<div class='bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded relative mb-4' role='alert'>Error deleting link: " . $stmt->error . "</div>";
+            }
+            $stmt->close();
         } else {
-            $_SESSION['message'] = "Error deleting streaming service link: " . $stmt->error;
-            $_SESSION['message_type'] = "danger";
+            $message = "<div class='bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded relative mb-4' role='alert'>Database error: " . $conn->error . "</div>";
         }
-        $stmt->close();
+        $active_tab = 'streaming_services';
     }
-    header("Location: admin.php?tab=streaming_services");
-    exit();
 }
 
-// Handle messages
-$message = '';
-$message_type = '';
-if (isset($_SESSION['message'])) {
-    $message = $_SESSION['message'];
-    $message_type = $_SESSION['message_type'];
-    unset($_SESSION['message']);
-    unset($_SESSION['message_type']);
+// --- Fetch Data for Display (all tabs) ---
+
+// Movies
+$movies = [];
+$result = $conn->query("SELECT movie_id, title, genre, release_date, language, duration, rating FROM movies ORDER BY title ASC");
+if ($result) {
+    while ($row = $result->fetch_assoc()) {
+        $movies[] = $row;
+    }
+} else {
+    $message .= "<div class='bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded relative mb-4' role='alert'>Error fetching movies: " . $conn->error . "</div>";
 }
 
-// Determine active tab
-$active_tab = isset($_GET['tab']) ? $_GET['tab'] : 'dashboard'; // Default to dashboard
+// Cinemas
+$cinemas = [];
+$result = $conn->query("SELECT c.cinema_id, c.name, c.location, ct.type_name, ct.type_id, ct.price FROM cinema c JOIN cinema_type ct ON c.type_id = ct.type_id ORDER BY c.name ASC");
+if ($result) {
+    while ($row = $result->fetch_assoc()) {
+        $cinemas[] = $row;
+    }
+} else {
+    $message .= "<div class='bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded relative mb-4' role='alert'>Error fetching cinemas: " . $conn->error . "</div>";
+}
 
+// Cinema Types for dropdown (for adding/editing cinemas)
+$cinema_types = [];
+$result = $conn->query("SELECT type_id, type_name, price FROM cinema_type ORDER BY type_name ASC");
+if ($result) {
+    while ($row = $result->fetch_assoc()) {
+        $cinema_types[] = $row;
+    }
+}
+
+// Users (FIXED: Using LEFT JOIN to determine role from admin/viewer tables)
+$users = [];
+$sql_users = "SELECT u.user_id, u.name, u.email, u.preference,
+                     CASE WHEN a.user_id IS NOT NULL THEN 'admin' ELSE 'viewer' END AS user_role
+              FROM user u
+              LEFT JOIN admin a ON u.user_id = a.user_id
+              ORDER BY u.name ASC";
+$result_users = $conn->query($sql_users);
+if ($result_users) {
+    while ($row = $result_users->fetch_assoc()) {
+        $users[] = $row;
+    }
+} else {
+    $message .= "<div class='bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded relative mb-4' role='alert'>Error fetching users: " . $conn->error . "</div>";
+}
+
+
+// Streaming Platforms
+$platforms = [];
+$result = $conn->query("SELECT platform_id, platform_name, website FROM streaming_platform ORDER BY platform_name ASC");
+if ($result) {
+    while ($row = $result->fetch_assoc()) {
+        $platforms[] = $row;
+    }
+} else {
+    $message .= "<div class='bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded relative mb-4' role='alert'>Error fetching streaming platforms: " . $conn->error . "</div>";
+}
+
+// Streaming Services (linking movies to platforms with prices)
+$streaming_services = [];
+$sql = "SELECT ss.streaming_id, m.title AS movie_title, ss.movie_id, sp.platform_name, ss.platform_id,
+               ss.price_720p, ss.price_1080p, ss.price_4k
+        FROM streaming_services ss
+        JOIN movies m ON ss.movie_id = m.movie_id
+        JOIN streaming_platform sp ON ss.platform_id = sp.platform_id
+        ORDER BY m.title ASC, sp.platform_name ASC";
+$result = $conn->query($sql);
+if ($result) {
+    while ($row = $result->fetch_assoc()) {
+        $streaming_services[] = $row;
+    }
+} else {
+    $message .= "<div class='bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded relative mb-4' role='alert'>Error fetching streaming services: " . $conn->error . "</div>";
+}
+
+// Close DB connection
+$conn->close();
 ?>
+
 <!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Admin Dashboard - Movies Management System</title>
-    <link rel="stylesheet" href="https://stackpath.bootstrapcdn.com/bootstrap/4.5.2/css/bootstrap.min.css">
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/5.15.3/css/all.min.css">
+    <title>Admin Dashboard</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
     <style>
         body {
-            background-color: #f8f9fa;
+            font-family: 'Inter', sans-serif;
+            background-color: #f0f2f5;
         }
-        .navbar {
-            background-color: #343a40 !important;
-        }
-        .navbar-brand, .nav-link {
-            color: #ffffff !important;
-        }
-        .sidebar {
-            height: 100vh;
-            background-color: #f2f2f2;
-            padding-top: 20px;
-            border-right: 1px solid #e0e0e0;
-        }
-        .sidebar .nav-link {
-            color: #333;
-            padding: 10px 15px;
-            border-radius: 5px;
-            margin-bottom: 5px;
-        }
-        .sidebar .nav-link.active {
-            background-color: #007bff;
-            color: #fff;
-        }
-        .sidebar .nav-link:hover {
-            background-color: #e9ecef;
-            color: #0056b3;
-        }
-        .content {
-            padding: 20px;
-        }
-        .card {
-            margin-bottom: 20px;
-            box-shadow: 0 0.125rem 0.25rem rgba(0,0,0,0.075);
-        }
-        .card-header {
-            background-color: #007bff;
+        .tab-button.active {
+            background-color: #4f46e5; /* indigo-600 */
             color: white;
+            border-bottom: 2px solid #4f46e5;
         }
-        .form-inline .form-control {
-            margin-right: 10px;
+        .tab-content {
+            display: none;
         }
-        .btn-action {
-            margin-right: 5px;
+        .tab-content.active {
+            display: block;
         }
-        /* Style for modals */
-        .modal-body .form-group {
-            margin-bottom: 1rem;
+        table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+        th, td {
+            padding: 12px 15px;
+            text-align: left;
+            border-bottom: 1px solid #e2e8f0;
+        }
+        th {
+            background-color: #f8fafc;
+            font-weight: 600;
+            color: #4a5568;
+            text-transform: uppercase;
+            font-size: 0.75rem;
+        }
+        tr:hover {
+            background-color: #f0f2f5;
+        }
+        .action-buttons {
+            display: flex;
+            gap: 8px;
+        }
+        .action-buttons a, .action-buttons button, .action-buttons .btn {
+            padding: 6px 12px;
+            border-radius: 5px;
+            font-size: 0.875rem;
+            text-decoration: none;
+            color: white;
+            cursor: pointer;
+            transition: background-color 0.2s ease-in-out;
+            border: none;
+        }
+        .action-buttons .edit-btn { background-color: #3b82f6; } /* blue-500 */
+        .action-buttons .edit-btn:hover { background-color: #2563eb; } /* blue-600 */
+        .action-buttons .delete-btn { background-color: #ef4444; } /* red-500 */
+        .action-buttons .delete-btn:hover { background-color: #dc2626; } /* red-600 */
+        .action-buttons .view-btn { background-color: #10b981; } /* emerald-500 */
+        .action-buttons .view-btn:hover { background-color: #059669; } /* emerald-600 */
+        .modal {
+            display: none; /* Hidden by default */
+            position: fixed; /* Stay in place */
+            z-index: 1000; /* Sit on top */
+            left: 0;
+            top: 0;
+            width: 100%; /* Full width */
+            height: 100%; /* Full height */
+            overflow: auto; /* Enable scroll if needed */
+            background-color: rgba(0,0,0,0.4); /* Black w/ opacity */
+            justify-content: center;
+            align-items: center;
+        }
+        .modal-content {
+            background-color: #fefefe;
+            margin: auto;
+            padding: 20px;
+            border-radius: 8px;
+            width: 90%;
+            max-width: 600px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+            position: relative;
+        }
+        .close-button {
+            color: #aaa;
+            float: right;
+            font-size: 28px;
+            font-weight: bold;
+            position: absolute;
+            top: 10px;
+            right: 20px;
+        }
+        .close-button:hover,
+        .close-button:focus {
+            color: black;
+            text-decoration: none;
+            cursor: pointer;
         }
     </style>
 </head>
-<body>
-    <nav class="navbar navbar-expand-lg navbar-dark">
-        <a class="navbar-brand" href="admin.php">MovieVerse Admin</a>
-        <button class="navbar-toggler" type="button" data-toggle="collapse" data-target="#navbarNav" aria-controls="navbarNav" aria-expanded="false" aria-label="Toggle navigation">
-            <span class="navbar-toggler-icon"></span>
-        </button>
-        <div class="collapse navbar-collapse" id="navbarNav">
-            <ul class="navbar-nav ml-auto">
-                <li class="nav-item">
-                    <span class="navbar-text">Welcome, <?php echo htmlspecialchars($admin_name); ?>!</span>
-                </li>
-                <li class="nav-item">
-                    <a class="nav-link" href="logout.php">Logout</a>
-                </li>
-            </ul>
+<body class="min-h-screen bg-gray-100 flex flex-col">
+    <nav class="bg-indigo-700 p-4 shadow-md">
+        <div class="container mx-auto flex justify-between items-center">
+            <h1 class="text-white text-2xl font-bold">Admin Dashboard</h1>
+            <div class="flex items-center space-x-4">
+                <span class="text-white text-lg">Welcome, Admin <?php echo htmlspecialchars($_SESSION['user_name']); ?>!</span>
+                <a href="index.php" class="bg-white text-indigo-700 px-4 py-2 rounded-md font-semibold hover:bg-indigo-100">Home</a>
+                <a href="logout.php" class="bg-white text-indigo-700 px-4 py-2 rounded-md font-semibold hover:bg-indigo-100">Logout</a>
+            </div>
         </div>
     </nav>
 
-    <div class="container-fluid">
-        <div class="row">
-            <nav class="col-md-2 d-none d-md-block sidebar">
-                <div class="sidebar-sticky">
-                    <ul class="nav flex-column">
-                        <li class="nav-item">
-                            <a class="nav-link <?php echo ($active_tab == 'dashboard' ? 'active' : ''); ?>" href="admin.php?tab=dashboard">
-                                <i class="fas fa-home"></i> Dashboard
-                            </a>
-                        </li>
-                        <li class="nav-item">
-                            <a class="nav-link <?php echo ($active_tab == 'users' ? 'active' : ''); ?>" href="admin.php?tab=users">
-                                <i class="fas fa-users"></i> Manage Users
-                            </a>
-                        </li>
-                        <li class="nav-item">
-                            <a class="nav-link <?php echo ($active_tab == 'movies' ? 'active' : ''); ?>" href="admin.php?tab=movies">
-                                <i class="fas fa-film"></i> Manage Movies
-                            </a>
-                        </li>
-                        <li class="nav-item">
-                            <a class="nav-link <?php echo ($active_tab == 'cinemas' ? 'active' : ''); ?>" href="admin.php?tab=cinemas">
-                                <i class="fas fa-building"></i> Manage Cinemas
-                            </a>
-                        </li>
-                         <li class="nav-item">
-                            <a class="nav-link <?php echo ($active_tab == 'cinema_types' ? 'active' : ''); ?>" href="admin.php?tab=cinema_types">
-                                <i class="fas fa-tags"></i> Manage Cinema Types
-                            </a>
-                        </li>
-                        <li class="nav-item">
-                            <a class="nav-link <?php echo ($active_tab == 'platforms' ? 'active' : ''); ?>" href="admin.php?tab=platforms">
-                                <i class="fas fa-tv"></i> Manage Streaming Platforms
-                            </a>
-                        </li>
-                        <li class="nav-item">
-                            <a class="nav-link <?php echo ($active_tab == 'streaming_services' ? 'active' : ''); ?>" href="admin.php?tab=streaming_services">
-                                <i class="fas fa-link"></i> Manage Movie Availability
-                            </a>
-                        </li>
-                        <li class="nav-item">
-                            <a class="nav-link" href="admin_view_bookings.php">
-                                <i class="fas fa-ticket-alt"></i> View Bookings
-                            </a>
-                        </li>
-                        <li class="nav-item">
-                            <a class="nav-link" href="admin_view_payments.php">
-                                <i class="fas fa-credit-card"></i> View Payments
-                            </a>
-                        </li>
-                        <li class="nav-item">
-                            <a class="nav-link" href="admin_view_subscriptions.php">
-                                <i class="fas fa-file-invoice-dollar"></i> View Subscriptions
-                            </a>
-                        </li>
-                        <li class="nav-item">
-                            <a class="nav-link" href="admin_view_recommendations.php">
-                                <i class="fas fa-lightbulb"></i> View Recommendations
-                            </a>
-                        </li>
-                    </ul>
-                </div>
-            </nav>
+    <main class="flex-grow container mx-auto p-6">
+        <?php echo $message; // Display messages ?>
 
-            <main role="main" class="col-md-9 ml-sm-auto col-lg-10 content">
-                <div class="d-flex justify-content-between flex-wrap flex-md-nowrap align-items-center pt-3 pb-2 mb-3 border-bottom">
-                    <h1 class="h2">Admin Dashboard</h1>
+        <div class="bg-white rounded-lg shadow-md overflow-hidden">
+            <div class="p-4 bg-gray-50 border-b border-gray-200">
+                <div class="flex space-x-2 overflow-x-auto pb-2"> <button class="tab-button px-4 py-2 rounded-md text-gray-700 font-semibold hover:bg-indigo-100 hover:text-indigo-700 <?php echo ($active_tab === 'movies') ? 'active' : ''; ?>" onclick="openTab('movies')">Movies</button>
+                    <button class="tab-button px-4 py-2 rounded-md text-gray-700 font-semibold hover:bg-indigo-100 hover:text-indigo-700 <?php echo ($active_tab === 'cinemas') ? 'active' : ''; ?>" onclick="openTab('cinemas')">Cinemas</button>
+                    <button class="tab-button px-4 py-2 rounded-md text-gray-700 font-semibold hover:bg-indigo-100 hover:text-indigo-700 <?php echo ($active_tab === 'users') ? 'active' : ''; ?>" onclick="openTab('users')">Users</button>
+                    <button class="tab-button px-4 py-2 rounded-md text-gray-700 font-semibold hover:bg-indigo-100 hover:text-indigo-700 <?php echo ($active_tab === 'platforms') ? 'active' : ''; ?>" onclick="openTab('platforms')">Streaming Platforms</button>
+                    <button class="tab-button px-4 py-2 rounded-md text-gray-700 font-semibold hover:bg-indigo-100 hover:text-indigo-700 <?php echo ($active_tab === 'streaming_services') ? 'active' : ''; ?>" onclick="openTab('streaming_services')">Streaming Services</button>
+                    <a href="admin_view_bookings.php" class="btn px-4 py-2 rounded-md text-gray-700 font-semibold hover:bg-indigo-100 hover:text-indigo-700 bg-white text-gray-700 border border-gray-300">View Bookings</a>
+                    <a href="admin_view_payments.php" class="btn px-4 py-2 rounded-md text-gray-700 font-semibold hover:bg-indigo-100 hover:text-indigo-700 bg-white text-gray-700 border border-gray-300">View Payments</a>
+                    <a href="admin_view_subscriptions.php" class="btn px-4 py-2 rounded-md text-gray-700 font-semibold hover:bg-indigo-100 hover:text-indigo-700 bg-white text-gray-700 border border-gray-300">View Subscriptions</a>
+                    <a href="admin_view_recommendations.php" class="btn px-4 py-2 rounded-md text-gray-700 font-semibold hover:bg-indigo-100 hover:text-indigo-700 bg-white text-gray-700 border border-gray-300">View Activity Log</a>
                 </div>
+            </div>
 
-                <?php if ($message): ?>
-                    <div class="alert alert-<?php echo $message_type; ?> alert-dismissible fade show" role="alert">
-                        <?php echo $message; ?>
-                        <button type="button" class="close" data-dismiss="alert" aria-label="Close">
-                            <span aria-hidden="true">&times;</span>
+            <div id="movies" class="tab-content p-6 <?php echo ($active_tab === 'movies') ? 'active' : ''; ?>">
+                <h2 class="text-xl font-bold text-gray-800 mb-4">Manage Movies</h2>
+
+                <div class="bg-gray-50 p-4 rounded-md mb-6 shadow-sm">
+                    <h3 class="text-lg font-semibold text-gray-700 mb-3">Add New Movie</h3>
+                    <form action="admin.php" method="POST" class="space-y-3">
+                        <input type="hidden" name="action" value="add_movie">
+                        <input type="hidden" name="tab" value="movies"> <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                            <div>
+                                <label for="movie_title" class="block text-sm font-medium text-gray-700">Title:</label>
+                                <input type="text" id="movie_title" name="title" required
+                                       class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm">
+                            </div>
+                            <div>
+                                <label for="movie_genre" class="block text-sm font-medium text-gray-700">Genre:</label>
+                                <input type="text" id="movie_genre" name="genre" required
+                                       class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm">
+                            </div>
+                            <div>
+                                <label for="movie_release_date" class="block text-sm font-medium text-gray-700">Release Date:</label>
+                                <input type="date" id="movie_release_date" name="release_date" required
+                                       class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm">
+                            </div>
+                            <div>
+                                <label for="movie_language" class="block text-sm font-medium text-gray-700">Language:</label>
+                                <input type="text" id="movie_language" name="language" required
+                                       class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm">
+                            </div>
+                            <div>
+                                <label for="movie_duration" class="block text-sm font-medium text-gray-700">Duration (mins):</label>
+                                <input type="number" id="movie_duration" name="duration" required min="1"
+                                       class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm">
+                            </div>
+                            <div>
+                                <label for="movie_rating" class="block text-sm font-medium text-gray-700">Rating (0.0 - 10.0):</label>
+                                <input type="number" step="0.1" min="0" max="10" id="movie_rating" name="rating" required
+                                       class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm">
+                            </div>
+                        </div>
+                        <button type="submit"
+                                class="w-full flex justify-center py-2 px-4 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
+                            Add Movie
                         </button>
+                    </form>
+                </div>
+
+                <h3 class="text-lg font-semibold text-gray-700 mb-3">Existing Movies</h3>
+                <?php if (!empty($movies)): ?>
+                    <div class="overflow-x-auto bg-white rounded-lg shadow-md">
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>ID</th>
+                                    <th>Title</th>
+                                    <th>Genre</th>
+                                    <th>Release Date</th>
+                                    <th>Language</th>
+                                    <th>Duration</th>
+                                    <th>Rating</th>
+                                    <th>Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <?php foreach ($movies as $movie): ?>
+                                    <tr>
+                                        <td><?php echo htmlspecialchars($movie['movie_id']); ?></td>
+                                        <td><?php echo htmlspecialchars($movie['title']); ?></td>
+                                        <td><?php echo htmlspecialchars($movie['genre']); ?></td>
+                                        <td><?php echo htmlspecialchars($movie['release_date']); ?></td>
+                                        <td><?php echo htmlspecialchars($movie['language']); ?></td>
+                                        <td><?php echo htmlspecialchars($movie['duration']); ?> mins</td>
+                                        <td><?php echo htmlspecialchars($movie['rating']); ?></td>
+                                        <td class="action-buttons">
+                                            <button onclick="openEditMovieModal(<?php echo htmlspecialchars(json_encode($movie)); ?>)" class="edit-btn">Edit</button>
+                                            <button onclick="confirmDelete('movie', <?php echo htmlspecialchars($movie['movie_id']); ?>)" class="delete-btn">Delete</button>
+                                        </td>
+                                    </tr>
+                                <?php endforeach; ?>
+                            </tbody>
+                        </table>
                     </div>
+                <?php else: ?>
+                    <p class="text-gray-700 text-center py-4">No movies found.</p>
                 <?php endif; ?>
+            </div>
 
-                <?php if ($active_tab == 'dashboard'): ?>
-                    <div class="row">
-                        <div class="col-md-4">
-                            <div class="card text-white bg-primary mb-3">
-                                <div class="card-header"><i class="fas fa-users"></i> Total Users</div>
-                                <div class="card-body">
-                                    <h5 class="card-title">
-                                        <?php
-                                        $result = $conn->query("SELECT COUNT(*) FROM user");
-                                        echo $result->fetch_row()[0];
-                                        ?>
-                                    </h5>
-                                    <p class="card-text">Registered users in the system.</p>
-                                </div>
-                            </div>
+            <div id="cinemas" class="tab-content p-6 <?php echo ($active_tab === 'cinemas') ? 'active' : ''; ?>">
+                <h2 class="text-xl font-bold text-gray-800 mb-4">Manage Cinemas</h2>
+
+                <div class="bg-gray-50 p-4 rounded-md mb-6 shadow-sm">
+                    <h3 class="text-lg font-semibold text-gray-700 mb-3">Add New Cinema</h3>
+                    <form action="admin.php" method="POST" class="space-y-3">
+                        <input type="hidden" name="action" value="add_cinema">
+                        <input type="hidden" name="tab" value="cinemas"> <div>
+                            <label for="cinema_name" class="block text-sm font-medium text-gray-700">Cinema Name:</label>
+                            <input type="text" id="cinema_name" name="name" required
+                                   class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm">
                         </div>
-                        <div class="col-md-4">
-                            <div class="card text-white bg-success mb-3">
-                                <div class="card-header"><i class="fas fa-film"></i> Total Movies</div>
-                                <div class="card-body">
-                                    <h5 class="card-title">
-                                        <?php
-                                        $result = $conn->query("SELECT COUNT(*) FROM movies");
-                                        echo $result->fetch_row()[0];
-                                        ?>
-                                    </h5>
-                                    <p class="card-text">Movies available for booking/streaming.</p>
-                                </div>
-                            </div>
+                        <div>
+                            <label for="cinema_location" class="block text-sm font-medium text-gray-700">Location:</label>
+                            <input type="text" id="cinema_location" name="location" required
+                                   class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm">
                         </div>
-                        <div class="col-md-4">
-                            <div class="card text-white bg-info mb-3">
-                                <div class="card-header"><i class="fas fa-ticket-alt"></i> Total Bookings</div>
-                                <div class="card-body">
-                                    <h5 class="card-title">
-                                        <?php
-                                        $result = $conn->query("SELECT COUNT(*) FROM booking");
-                                        echo $result->fetch_row()[0];
-                                        ?>
-                                    </h5>
-                                    <p class="card-text">Number of cinema tickets booked.</p>
-                                </div>
-                            </div>
+                        <div>
+                            <label for="cinema_type_id" class="block text-sm font-medium text-gray-700">Cinema Type:</label>
+                            <select id="cinema_type_id" name="type_id" required
+                                    class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm">
+                                <option value="">Select Type</option>
+                                <?php foreach ($cinema_types as $type): ?>
+                                    <option value="<?php echo htmlspecialchars($type['type_id']); ?>"><?php echo htmlspecialchars($type['type_name']); ?> (PKR <?php echo htmlspecialchars(number_format($type['price'], 2)); ?>)</option>
+                                <?php endforeach; ?>
+                            </select>
                         </div>
+                        <button type="submit"
+                                class="w-full flex justify-center py-2 px-4 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
+                            Add Cinema
+                        </button>
+                    </form>
+                </div>
+
+                <h3 class="text-lg font-semibold text-gray-700 mb-3">Existing Cinemas</h3>
+                <?php if (!empty($cinemas)): ?>
+                    <div class="overflow-x-auto bg-white rounded-lg shadow-md">
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>ID</th>
+                                    <th>Name</th>
+                                    <th>Location</th>
+                                    <th>Type</th>
+                                    <th>Base Price</th>
+                                    <th>Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <?php foreach ($cinemas as $cinema): ?>
+                                    <tr>
+                                        <td><?php echo htmlspecialchars($cinema['cinema_id']); ?></td>
+                                        <td><?php echo htmlspecialchars($cinema['name']); ?></td>
+                                        <td><?php echo htmlspecialchars($cinema['location']); ?></td>
+                                        <td><?php echo htmlspecialchars($cinema['type_name']); ?></td>
+                                        <td>PKR <?php echo htmlspecialchars(number_format($cinema['price'], 2)); ?></td>
+                                        <td class="action-buttons">
+                                            <button onclick="openEditCinemaModal(<?php echo htmlspecialchars(json_encode($cinema)); ?>)" class="edit-btn">Edit</button>
+                                            <button onclick="confirmDelete('cinema', <?php echo htmlspecialchars($cinema['cinema_id']); ?>)" class="delete-btn">Delete</button>
+                                        </td>
+                                    </tr>
+                                <?php endforeach; ?>
+                            </tbody>
+                        </table>
                     </div>
+                <?php else: ?>
+                    <p class="text-gray-700 text-center py-4">No cinemas found.</p>
                 <?php endif; ?>
+            </div>
 
-                <?php if ($active_tab == 'users'): ?>
-                    <div class="card">
-                        <div class="card-header">
-                            <i class="fas fa-users"></i> Manage Users
-                        </div>
-                        <div class="card-body">
-                            <div class="table-responsive">
-                                <table class="table table-bordered table-striped">
-                                    <thead>
-                                        <tr>
-                                            <th>ID</th>
-                                            <th>Name</th>
-                                            <th>Email</th>
-                                            <th>Age</th>
-                                            <th>Preference</th>
-                                            <th>Role</th>
-                                            <th>Actions</th>
-                                        </tr>
-                                    </thead>
-                                    <tbody>
-                                        <?php
-                                        // FIX: Corrected query for user roles based on specialization tables
-                                        $sql_users = "SELECT u.user_id, u.name, u.age, u.email, u.preference,
-                                                             CASE WHEN a.user_id IS NOT NULL THEN 'Admin' ELSE 'Viewer' END AS user_role
-                                                      FROM user u
-                                                      LEFT JOIN admin a ON u.user_id = a.user_id
-                                                      ORDER BY u.name ASC";
-                                        $stmt_users = $conn->prepare($sql_users);
-                                        $stmt_users->execute();
-                                        $result_users = $stmt_users->get_result();
+            <div id="users" class="tab-content p-6 <?php echo ($active_tab === 'users') ? 'active' : ''; ?>">
+                <h2 class="text-xl font-bold text-gray-800 mb-4">Manage Users</h2>
 
-                                        if ($result_users->num_rows > 0) {
-                                            while ($row = $result_users->fetch_assoc()) {
-                                                echo "<tr>";
-                                                echo "<td>" . htmlspecialchars($row['user_id']) . "</td>";
-                                                echo "<td>" . htmlspecialchars($row['name']) . "</td>";
-                                                echo "<td>" . htmlspecialchars($row['email']) . "</td>";
-                                                echo "<td>" . htmlspecialchars($row['age']) . "</td>";
-                                                echo "<td>" . htmlspecialchars($row['preference']) . "</td>";
-                                                echo "<td>" . htmlspecialchars($row['user_role']) . "</td>";
-                                                echo "<td>";
-                                                if ($row['user_id'] != $_SESSION['user_id']) { // Prevent admin from deleting/changing own role
-                                                    echo "<form method='POST' style='display:inline-block; margin-right: 5px;' onsubmit='return confirm(\"Are you sure you want to change this user\\'s role?\");'>";
-                                                    echo "<input type='hidden' name='action' value='change_user_role'>";
-                                                    echo "<input type='hidden' name='user_id' value='" . htmlspecialchars($row['user_id']) . "'>";
-                                                    echo "<input type='hidden' name='current_role' value='" . htmlspecialchars($row['user_role']) . "'>";
-                                                    echo "<button type='submit' class='btn btn-sm btn-warning btn-action'>" . ($row['user_role'] == 'Admin' ? 'Demote to Viewer' : 'Promote to Admin') . "</button>";
-                                                    echo "</form>";
-
-                                                    echo "<form method='POST' style='display:inline-block;' onsubmit='return confirm(\"Are you sure you want to delete this user? This action is irreversible.\");'>";
-                                                    echo "<input type='hidden' name='action' value='delete_user'>";
-                                                    echo "<input type='hidden' name='user_id' value='" . htmlspecialchars($row['user_id']) . "'>";
-                                                    echo "<button type='submit' class='btn btn-sm btn-danger btn-action'><i class='fas fa-trash'></i> Delete</button>";
-                                                    echo "</form>";
-                                                } else {
-                                                    echo "<span class='text-muted'>Current Admin</span>";
-                                                }
-                                                echo "</td>";
-                                                echo "</tr>";
-                                            }
-                                        } else {
-                                            echo "<tr><td colspan='7'>No users found.</td></tr>";
-                                        }
-                                        $stmt_users->close();
-                                        ?>
-                                    </tbody>
-                                </table>
+                <div class="bg-gray-50 p-4 rounded-md mb-6 shadow-sm">
+                    <h3 class="text-lg font-semibold text-gray-700 mb-3">Add New User</h3>
+                    <form action="admin.php" method="POST" class="space-y-3">
+                        <input type="hidden" name="action" value="add_user">
+                        <input type="hidden" name="tab" value="users"> <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                            <div>
+                                <label for="user_name" class="block text-sm font-medium text-gray-700">Name:</label>
+                                <input type="text" id="user_name" name="name" required
+                                       class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm">
+                            </div>
+                            <div>
+                                <label for="user_age" class="block text-sm font-medium text-gray-700">Age:</label>
+                                <input type="number" id="user_age" name="age" required min="1"
+                                       class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm">
+                            </div>
+                            <div>
+                                <label for="user_email" class="block text-sm font-medium text-gray-700">Email:</label>
+                                <input type="email" id="user_email" name="email" required
+                                       class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm">
+                            </div>
+                            <div>
+                                <label for="user_password" class="block text-sm font-medium text-gray-700">Password:</label>
+                                <input type="password" id="user_password" name="password" required
+                                       class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm">
+                            </div>
+                            <div>
+                                <label for="user_preference" class="block text-sm font-medium text-gray-700">Preference:</label>
+                                <select id="user_preference" name="preference" required
+                                        class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm">
+                                    <option value="">Select Preference</option>
+                                    <option value="cinema">Cinema</option>
+                                    <option value="streaming">Streaming</option>
+                                    <option value="both">Both</option>
+                                </select>
+                            </div>
+                            <div>
+                                <label for="user_role_to_add" class="block text-sm font-medium text-gray-700">User Role:</label>
+                                <select id="user_role_to_add" name="user_role" required
+                                        class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm">
+                                    <option value="">Select Role</option>
+                                    <option value="viewer">Viewer</option>
+                                    <option value="admin">Admin</option>
+                                </select>
                             </div>
                         </div>
+                        <button type="submit"
+                                class="w-full flex justify-center py-2 px-4 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
+                            Add User
+                        </button>
+                    </form>
+                </div>
+
+                <h3 class="text-lg font-semibold text-gray-700 mb-3">Existing Users</h3>
+                <?php if (!empty($users)): ?>
+                    <div class="overflow-x-auto bg-white rounded-lg shadow-md">
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>ID</th>
+                                    <th>Name</th>
+                                    <th>Email</th>
+                                    <th>Preference</th>
+                                    <th>User Role</th>
+                                    <th>Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <?php foreach ($users as $user): ?>
+                                    <tr>
+                                        <td><?php echo htmlspecialchars($user['user_id']); ?></td>
+                                        <td><?php echo htmlspecialchars($user['name']); ?></td>
+                                        <td><?php echo htmlspecialchars($user['email']); ?></td>
+                                        <td><?php echo htmlspecialchars(ucfirst($user['preference'])); ?></td>
+                                        <td>
+                                            <form action="admin.php" method="POST" class="flex items-center space-x-2">
+                                                <input type="hidden" name="action" value="update_user_role">
+                                                <input type="hidden" name="user_id" value="<?php echo htmlspecialchars($user['user_id']); ?>">
+                                                <input type="hidden" name="tab" value="users"> <select name="new_role" onchange="this.form.submit()"
+                                                        class="px-2 py-1 border border-gray-300 rounded-md shadow-sm text-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500">
+                                                    <option value="viewer" <?php echo ($user['user_role'] === 'viewer') ? 'selected' : ''; ?>>Viewer</option>
+                                                    <option value="admin" <?php echo ($user['user_role'] === 'admin') ? 'selected' : ''; ?>>Admin</option>
+                                                </select>
+                                            </form>
+                                        </td>
+                                        <td class="action-buttons">
+                                            <?php if ($user['user_id'] !== $_SESSION['user_id']): ?>
+                                                <button onclick="confirmDelete('user', <?php echo htmlspecialchars($user['user_id']); ?>)" class="delete-btn">Delete</button>
+                                            <?php else: ?>
+                                                <span class="text-gray-500 text-sm">Cannot delete self</span>
+                                            <?php endif; ?>
+                                        </td>
+                                    </tr>
+                                <?php endforeach; ?>
+                            </tbody>
+                        </table>
                     </div>
+                <?php else: ?>
+                    <p class="text-gray-700 text-center py-4">No users found.</p>
                 <?php endif; ?>
+            </div>
 
-                <?php if ($active_tab == 'movies'): ?>
-                    <div class="card">
-                        <div class="card-header">
-                            <i class="fas fa-film"></i> Manage Movies
+            <div id="platforms" class="tab-content p-6 <?php echo ($active_tab === 'platforms') ? 'active' : ''; ?>">
+                <h2 class="text-xl font-bold text-gray-800 mb-4">Manage Streaming Platforms</h2>
+
+                <div class="bg-gray-50 p-4 rounded-md mb-6 shadow-sm">
+                    <h3 class="text-lg font-semibold text-gray-700 mb-3">Add New Platform</h3>
+                    <form action="admin.php" method="POST" class="space-y-3">
+                        <input type="hidden" name="action" value="add_platform">
+                        <input type="hidden" name="tab" value="platforms"> <div>
+                            <label for="platform_name" class="block text-sm font-medium text-gray-700">Platform Name:</label>
+                            <input type="text" id="platform_name" name="platform_name" required
+                                   class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm">
                         </div>
-                        <div class="card-body">
-                            <button type="button" class="btn btn-primary mb-3" data-toggle="modal" data-target="#addMovieModal">
-                                <i class="fas fa-plus"></i> Add New Movie
-                            </button>
-
-                            <div class="table-responsive">
-                                <table class="table table-bordered table-striped">
-                                    <thead>
-                                        <tr>
-                                            <th>ID</th>
-                                            <th>Title</th>
-                                            <th>Genre</th>
-                                            <th>Release Date</th>
-                                            <th>Language</th>
-                                            <th>Duration (min)</th>
-                                            <th>Rating</th>
-                                            <th>Actions</th>
-                                        </tr>
-                                    </thead>
-                                    <tbody>
-                                        <?php
-                                        $sql_movies = "SELECT * FROM movies";
-                                        $result_movies = $conn->query($sql_movies);
-
-                                        if ($result_movies->num_rows > 0) {
-                                            while ($row = $result_movies->fetch_assoc()) {
-                                                echo "<tr>";
-                                                echo "<td>" . htmlspecialchars($row['movie_id']) . "</td>";
-                                                echo "<td>" . htmlspecialchars($row['title']) . "</td>";
-                                                echo "<td>" . htmlspecialchars($row['genre']) . "</td>";
-                                                echo "<td>" . htmlspecialchars($row['release_date']) . "</td>";
-                                                echo "<td>" . htmlspecialchars($row['language']) . "</td>";
-                                                echo "<td>" . htmlspecialchars($row['duration']) . "</td>";
-                                                echo "<td>" . htmlspecialchars($row['rating']) . "</td>";
-                                                echo "<td>";
-                                                echo "<button type='button' class='btn btn-sm btn-info btn-action' data-toggle='modal' data-target='#editMovieModal' " .
-                                                     "data-movie_id='" . htmlspecialchars($row['movie_id']) . "' " .
-                                                     "data-title='" . htmlspecialchars($row['title']) . "' " .
-                                                     "data-genre='" . htmlspecialchars($row['genre']) . "' " .
-                                                     "data-release_date='" . htmlspecialchars($row['release_date']) . "' " .
-                                                     "data-language='" . htmlspecialchars($row['language']) . "' " .
-                                                     "data-duration='" . htmlspecialchars($row['duration']) . "' " .
-                                                     "data-rating='" . htmlspecialchars($row['rating']) . "'>" .
-                                                     "<i class='fas fa-edit'></i> Edit</button>";
-                                                echo "<form method='POST' style='display:inline-block;' onsubmit='return confirm(\"Are you sure you want to delete this movie?\");'>";
-                                                echo "<input type='hidden' name='movie_action' value='delete'>";
-                                                echo "<input type='hidden' name='movie_id' value='" . htmlspecialchars($row['movie_id']) . "'>";
-                                                echo "<button type='submit' class='btn btn-sm btn-danger btn-action'><i class='fas fa-trash'></i> Delete</button>";
-                                                echo "</form>";
-                                                echo "</td>";
-                                                echo "</tr>";
-                                            }
-                                        } else {
-                                            echo "<tr><td colspan='8'>No movies found.</td></tr>";
-                                        }
-                                        ?>
-                                    </tbody>
-                                </table>
-                            </div>
+                        <div>
+                            <label for="platform_website" class="block text-sm font-medium text-gray-700">Website URL:</label>
+                            <input type="url" id="platform_website" name="website" placeholder="e.g., https://www.example.com"
+                                   class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm">
                         </div>
+                        <button type="submit"
+                                class="w-full flex justify-center py-2 px-4 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
+                            Add Platform
+                        </button>
+                    </form>
+                </div>
+
+                <h3 class="text-lg font-semibold text-gray-700 mb-3">Existing Platforms</h3>
+                <?php if (!empty($platforms)): ?>
+                    <div class="overflow-x-auto bg-white rounded-lg shadow-md">
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>ID</th>
+                                    <th>Platform Name</th>
+                                    <th>Website</th>
+                                    <th>Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <?php foreach ($platforms as $platform): ?>
+                                    <tr>
+                                        <td><?php echo htmlspecialchars($platform['platform_id']); ?></td>
+                                        <td><?php echo htmlspecialchars($platform['platform_name']); ?></td>
+                                        <td>
+                                            <?php if (!empty($platform['website'])): ?>
+                                                <a href="<?php echo htmlspecialchars($platform['website']); ?>" target="_blank" class="text-blue-600 hover:underline">Visit Site</a>
+                                            <?php else: ?>
+                                                N/A
+                                            <?php endif; ?>
+                                        </td>
+                                        <td class="action-buttons">
+                                            <button onclick="openEditPlatformModal(<?php echo htmlspecialchars(json_encode($platform)); ?>)" class="edit-btn">Edit</button>
+                                            <button onclick="confirmDelete('platform', <?php echo htmlspecialchars($platform['platform_id']); ?>)" class="delete-btn">Delete</button>
+                                        </td>
+                                    </tr>
+                                <?php endforeach; ?>
+                            </tbody>
+                        </table>
                     </div>
+                <?php else: ?>
+                    <p class="text-gray-700 text-center py-4">No streaming platforms found.</p>
                 <?php endif; ?>
+            </div>
 
-                <div class="modal fade" id="addMovieModal" tabindex="-1" role="dialog" aria-labelledby="addMovieModalLabel" aria-hidden="true">
-                    <div class="modal-dialog" role="document">
-                        <div class="modal-content">
-                            <div class="modal-header">
-                                <h5 class="modal-title" id="addMovieModalLabel">Add New Movie</h5>
-                                <button type="button" class="close" data-dismiss="modal" aria-label="Close">
-                                    <span aria-hidden="true">&times;</span>
-                                </button>
-                            </div>
-                            <form action="admin.php" method="POST">
-                                <div class="modal-body">
-                                    <input type="hidden" name="movie_action" value="add">
-                                    <div class="form-group">
-                                        <label for="add_title">Title</label>
-                                        <input type="text" class="form-control" id="add_title" name="title" required>
-                                    </div>
-                                    <div class="form-group">
-                                        <label for="add_genre">Genre</label>
-                                        <input type="text" class="form-control" id="add_genre" name="genre" required>
-                                    </div>
-                                    <div class="form-group">
-                                        <label for="add_release_date">Release Date</label>
-                                        <input type="date" class="form-control" id="add_release_date" name="release_date" required>
-                                    </div>
-                                    <div class="form-group">
-                                        <label for="add_language">Language</label>
-                                        <input type="text" class="form-control" id="add_language" name="language" required>
-                                    </div>
-                                    <div class="form-group">
-                                        <label for="add_duration">Duration (minutes)</label>
-                                        <input type="number" class="form-control" id="add_duration" name="duration" required>
-                                    </div>
-                                    <div class="form-group">
-                                        <label for="add_rating">Rating (0.0 - 10.0)</label>
-                                        <input type="number" step="0.1" class="form-control" id="add_rating" name="rating" min="0" max="10" required>
-                                    </div>
-                                </div>
-                                <div class="modal-footer">
-                                    <button type="button" class="btn btn-secondary" data-dismiss="modal">Close</button>
-                                    <button type="submit" class="btn btn-primary">Add Movie</button>
-                                </div>
-                            </form>
+            <div id="streaming_services" class="tab-content p-6 <?php echo ($active_tab === 'streaming_services') ? 'active' : ''; ?>">
+                <h2 class="text-xl font-bold text-gray-800 mb-4">Manage Streaming Services (Movie-Platform Links)</h2>
+
+                <div class="bg-gray-50 p-4 rounded-md mb-6 shadow-sm">
+                    <h3 class="text-lg font-semibold text-gray-700 mb-3">Add New Movie-Platform Link</h3>
+                    <form action="admin.php" method="POST" class="space-y-3">
+                        <input type="hidden" name="action" value="add_streaming_service">
+                        <input type="hidden" name="tab" value="streaming_services"> <div>
+                            <label for="service_movie_id" class="block text-sm font-medium text-gray-700">Movie:</label>
+                            <select id="service_movie_id" name="movie_id" required
+                                    class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm">
+                                <option value="">Select Movie</option>
+                                <?php foreach ($movies as $movie): ?>
+                                    <option value="<?php echo htmlspecialchars($movie['movie_id']); ?>"><?php echo htmlspecialchars($movie['title']); ?></option>
+                                <?php endforeach; ?>
+                            </select>
                         </div>
-                    </div>
+                        <div>
+                            <label for="service_platform_id" class="block text-sm font-medium text-gray-700">Streaming Platform:</label>
+                            <select id="service_platform_id" name="platform_id" required
+                                    class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm">
+                                <option value="">Select Platform</option>
+                                <?php foreach ($platforms as $platform): ?>
+                                    <option value="<?php echo htmlspecialchars($platform['platform_id']); ?>"><?php echo htmlspecialchars($platform['platform_name']); ?></option>
+                                <?php endforeach; ?>
+                            </select>
+                        </div>
+                        <div>
+                            <label for="service_price_720p" class="block text-sm font-medium text-gray-700">Price (720p):</label>
+                            <input type="number" step="0.01" min="0" id="service_price_720p" name="price_720p" value="0.00" required
+                                   class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm">
+                        </div>
+                        <div>
+                            <label for="service_price_1080p" class="block text-sm font-medium text-gray-700">Price (1080p):</label>
+                            <input type="number" step="0.01" min="0" id="service_price_1080p" name="price_1080p" value="0.00" required
+                                   class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm">
+                        </div>
+                        <div>
+                            <label for="service_price_4k" class="block text-sm font-medium text-gray-700">Price (4K):</label>
+                            <input type="number" step="0.01" min="0" id="service_price_4k" name="price_4k" value="0.00" required
+                                   class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm">
+                        </div>
+                        <button type="submit"
+                                class="w-full flex justify-center py-2 px-4 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
+                            Add Link
+                        </button>
+                    </form>
                 </div>
 
-                <div class="modal fade" id="editMovieModal" tabindex="-1" role="dialog" aria-labelledby="editMovieModalLabel" aria-hidden="true">
-                    <div class="modal-dialog" role="document">
-                        <div class="modal-content">
-                            <div class="modal-header">
-                                <h5 class="modal-title" id="editMovieModalLabel">Edit Movie</h5>
-                                <button type="button" class="close" data-dismiss="modal" aria-label="Close">
-                                    <span aria-hidden="true">&times;</span>
-                                </button>
-                            </div>
-                            <form action="admin.php" method="POST">
-                                <div class="modal-body">
-                                    <input type="hidden" name="movie_action" value="update">
-                                    <input type="hidden" name="movie_id" id="edit_movie_id">
-                                    <div class="form-group">
-                                        <label for="edit_title">Title</label>
-                                        <input type="text" class="form-control" id="edit_title" name="title" required>
-                                    </div>
-                                    <div class="form-group">
-                                        <label for="edit_genre">Genre</label>
-                                        <input type="text" class="form-control" id="edit_genre" name="genre" required>
-                                    </div>
-                                    <div class="form-group">
-                                        <label for="edit_release_date">Release Date</label>
-                                        <input type="date" class="form-control" id="edit_release_date" name="release_date" required>
-                                    </div>
-                                    <div class="form-group">
-                                        <label for="edit_language">Language</label>
-                                        <input type="text" class="form-control" id="edit_language" name="language" required>
-                                    </div>
-                                    <div class="form-group">
-                                        <label for="edit_duration">Duration (minutes)</label>
-                                        <input type="number" class="form-control" id="edit_duration" name="duration" required>
-                                    </div>
-                                    <div class="form-group">
-                                        <label for="edit_rating">Rating (0.0 - 10.0)</label>
-                                        <input type="number" step="0.1" class="form-control" id="edit_rating" name="rating" min="0" max="10" required>
-                                    </div>
-                                </div>
-                                <div class="modal-footer">
-                                    <button type="button" class="btn btn-secondary" data-dismiss="modal">Close</button>
-                                    <button type="submit" class="btn btn-primary">Save Changes</button>
-                                </div>
-                            </form>
-                        </div>
+                <h3 class="text-lg font-semibold text-gray-700 mb-3">Existing Movie-Platform Links</h3>
+                <?php if (!empty($streaming_services)): ?>
+                    <div class="overflow-x-auto bg-white rounded-lg shadow-md">
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>ID</th>
+                                    <th>Movie Title</th>
+                                    <th>Platform Name</th>
+                                    <th>720p Price</th>
+                                    <th>1080p Price</th>
+                                    <th>4K Price</th>
+                                    <th>Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <?php foreach ($streaming_services as $service): ?>
+                                    <tr>
+                                        <td><?php echo htmlspecialchars($service['streaming_id']); ?></td>
+                                        <td><?php echo htmlspecialchars($service['movie_title']); ?></td>
+                                        <td><?php echo htmlspecialchars($service['platform_name']); ?></td>
+                                        <td>PKR <?php echo htmlspecialchars(number_format($service['price_720p'], 2)); ?></td>
+                                        <td>PKR <?php echo htmlspecialchars(number_format($service['price_1080p'], 2)); ?></td>
+                                        <td>PKR <?php echo htmlspecialchars(number_format($service['price_4k'], 2)); ?></td>
+                                        <td class="action-buttons">
+                                            <button onclick="openEditStreamingServiceModal(<?php echo htmlspecialchars(json_encode($service)); ?>)" class="edit-btn">Edit</button>
+                                            <button onclick="confirmDelete('streaming_service', <?php echo htmlspecialchars($service['streaming_id']); ?>)" class="delete-btn">Delete</button>
+                                        </td>
+                                    </tr>
+                                <?php endforeach; ?>
+                            </tbody>
+                        </table>
                     </div>
-                </div>
-
-
-                <?php if ($active_tab == 'cinemas'): ?>
-                    <div class="card">
-                        <div class="card-header">
-                            <i class="fas fa-building"></i> Manage Cinemas
-                        </div>
-                        <div class="card-body">
-                            <button type="button" class="btn btn-primary mb-3" data-toggle="modal" data-target="#addCinemaModal">
-                                <i class="fas fa-plus"></i> Add New Cinema
-                            </button>
-
-                            <div class="table-responsive">
-                                <table class="table table-bordered table-striped">
-                                    <thead>
-                                        <tr>
-                                            <th>ID</th>
-                                            <th>Name</th>
-                                            <th>Location</th>
-                                            <th>Type</th>
-                                            <th>Actions</th>
-                                        </tr>
-                                    </thead>
-                                    <tbody>
-                                        <?php
-                                        $sql_cinemas = "SELECT c.cinema_id, c.name, c.location, ct.type_name, ct.type_id
-                                                        FROM cinema c JOIN cinema_type ct ON c.type_id = ct.type_id";
-                                        $result_cinemas = $conn->query($sql_cinemas);
-
-                                        if ($result_cinemas->num_rows > 0) {
-                                            while ($row = $result_cinemas->fetch_assoc()) {
-                                                echo "<tr>";
-                                                echo "<td>" . htmlspecialchars($row['cinema_id']) . "</td>";
-                                                echo "<td>" . htmlspecialchars($row['name']) . "</td>";
-                                                echo "<td>" . htmlspecialchars($row['location']) . "</td>";
-                                                echo "<td>" . htmlspecialchars($row['type_name']) . "</td>";
-                                                echo "<td>";
-                                                echo "<button type='button' class='btn btn-sm btn-info btn-action' data-toggle='modal' data-target='#editCinemaModal' " .
-                                                     "data-cinema_id='" . htmlspecialchars($row['cinema_id']) . "' " .
-                                                     "data-name='" . htmlspecialchars($row['name']) . "' " .
-                                                     "data-location='" . htmlspecialchars($row['location']) . "' " .
-                                                     "data-type_id='" . htmlspecialchars($row['type_id']) . "'>" . // Pass type_id for dropdown
-                                                     "<i class='fas fa-edit'></i> Edit</button>";
-                                                echo "<form method='POST' style='display:inline-block;' onsubmit='return confirm(\"Are you sure you want to delete this cinema?\");'>";
-                                                echo "<input type='hidden' name='cinema_action' value='delete'>";
-                                                echo "<input type='hidden' name='cinema_id' value='" . htmlspecialchars($row['cinema_id']) . "'>";
-                                                echo "<button type='submit' class='btn btn-sm btn-danger btn-action'><i class='fas fa-trash'></i> Delete</button>";
-                                                echo "</form>";
-                                                echo "</td>";
-                                                echo "</tr>";
-                                            }
-                                        } else {
-                                            echo "<tr><td colspan='5'>No cinemas found.</td></tr>";
-                                        }
-                                        ?>
-                                    </tbody>
-                                </table>
-                            </div>
-                        </div>
-                    </div>
+                <?php else: ?>
+                    <p class="text-gray-700 text-center py-4">No movie-platform links found.</p>
                 <?php endif; ?>
+            </div>
 
-                <div class="modal fade" id="addCinemaModal" tabindex="-1" role="dialog" aria-labelledby="addCinemaModalLabel" aria-hidden="true">
-                    <div class="modal-dialog" role="document">
-                        <div class="modal-content">
-                            <div class="modal-header">
-                                <h5 class="modal-title" id="addCinemaModalLabel">Add New Cinema</h5>
-                                <button type="button" class="close" data-dismiss="modal" aria-label="Close">
-                                    <span aria-hidden="true">&times;</span>
-                                </button>
-                            </div>
-                            <form action="admin.php" method="POST">
-                                <div class="modal-body">
-                                    <input type="hidden" name="cinema_action" value="add">
-                                    <div class="form-group">
-                                        <label for="add_cinema_name">Name</label>
-                                        <input type="text" class="form-control" id="add_cinema_name" name="name" required>
-                                    </div>
-                                    <div class="form-group">
-                                        <label for="add_cinema_location">Location</label>
-                                        <input type="text" class="form-control" id="add_cinema_location" name="location" required>
-                                    </div>
-                                    <div class="form-group">
-                                        <label for="add_cinema_type_id">Type</label>
-                                        <select class="form-control" id="add_cinema_type_id" name="type_id" required>
-                                            <?php
-                                            $sql_cinema_types = "SELECT type_id, type_name FROM cinema_type";
-                                            $result_cinema_types = $conn->query($sql_cinema_types);
-                                            while ($row_type = $result_cinema_types->fetch_assoc()) {
-                                                echo "<option value='" . htmlspecialchars($row_type['type_id']) . "'>" . htmlspecialchars($row_type['type_name']) . "</option>";
-                                            }
-                                            ?>
-                                        </select>
-                                    </div>
-                                </div>
-                                <div class="modal-footer">
-                                    <button type="button" class="btn btn-secondary" data-dismiss="modal">Close</button>
-                                    <button type="submit" class="btn btn-primary">Add Cinema</button>
-                                </div>
-                            </form>
-                        </div>
-                    </div>
+            <div id="admin_views" class="tab-content p-6">
+                <h2 class="text-xl font-bold text-gray-800 mb-4">Other Admin Views</h2>
+                <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                    <a href="admin_view_bookings.php" class="bg-indigo-600 text-white p-4 rounded-lg shadow hover:bg-indigo-700 flex items-center justify-center text-lg font-semibold">
+                        View & Manage Bookings
+                    </a>
+                    <a href="admin_view_payments.php" class="bg-indigo-600 text-white p-4 rounded-lg shadow hover:bg-indigo-700 flex items-center justify-center text-lg font-semibold">
+                        View & Manage Payments
+                    </a>
+                    <a href="admin_view_subscriptions.php" class="bg-indigo-600 text-white p-4 rounded-lg shadow hover:bg-indigo-700 flex items-center justify-center text-lg font-semibold">
+                        View & Manage Subscriptions
+                    </a>
+                    <a href="admin_view_recommendations.php" class="bg-indigo-600 text-white p-4 rounded-lg shadow hover:bg-indigo-700 flex items-center justify-center text-lg font-semibold">
+                        View & Manage Activity Log
+                    </a>
+                </div>
+            </div>
+
+        </div>
+    </main>
+
+    <footer class="bg-gray-800 text-white text-center p-4 mt-auto">
+        <div class="container mx-auto">
+            <p>&copy; <?php echo date('Y'); ?> Movies Management System. Admin Panel.</p>
+        </div>
+    </footer>
+
+    <div id="editMovieModal" class="modal">
+        <div class="modal-content">
+            <span class="close-button" onclick="closeModal('editMovieModal')">&times;</span>
+            <h3 class="text-2xl font-bold text-gray-800 mb-4">Edit Movie</h3>
+            <form action="admin.php" method="POST" class="space-y-4">
+                <input type="hidden" name="action" value="update_movie">
+                <input type="hidden" name="tab" value="movies"> <input type="hidden" name="movie_id" id="edit_movie_id">
+
+                <div>
+                    <label for="edit_movie_title" class="block text-sm font-medium text-gray-700">Title:</label>
+                    <input type="text" id="edit_movie_title" name="title" required
+                           class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm">
+                </div>
+                <div>
+                    <label for="edit_movie_genre" class="block text-sm font-medium text-gray-700">Genre:</label>
+                    <input type="text" id="edit_movie_genre" name="genre" required
+                           class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm">
+                </div>
+                <div>
+                    <label for="edit_movie_release_date" class="block text-sm font-medium text-gray-700">Release Date:</label>
+                    <input type="date" id="edit_movie_release_date" name="release_date" required
+                           class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm">
+                </div>
+                <div>
+                    <label for="edit_movie_language" class="block text-sm font-medium text-gray-700">Language:</label>
+                    <input type="text" id="edit_movie_language" name="language" required
+                           class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm">
+                </div>
+                <div>
+                    <label for="edit_movie_duration" class="block text-sm font-medium text-gray-700">Duration (mins):</label>
+                    <input type="number" id="edit_movie_duration" name="duration" required min="1"
+                           class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm">
+                </div>
+                <div>
+                    <label for="edit_movie_rating" class="block text-sm font-medium text-gray-700">Rating (0.0 - 10.0):</label>
+                    <input type="number" step="0.1" min="0" max="10" id="edit_movie_rating" name="rating" required
+                           class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm">
                 </div>
 
-                <div class="modal fade" id="editCinemaModal" tabindex="-1" role="dialog" aria-labelledby="editCinemaModalLabel" aria-hidden="true">
-                    <div class="modal-dialog" role="document">
-                        <div class="modal-content">
-                            <div class="modal-header">
-                                <h5 class="modal-title" id="editCinemaModalLabel">Edit Cinema</h5>
-                                <button type="button" class="close" data-dismiss="modal" aria-label="Close">
-                                    <span aria-hidden="true">&times;</span>
-                                </button>
-                            </div>
-                            <form action="admin.php" method="POST">
-                                <div class="modal-body">
-                                    <input type="hidden" name="cinema_action" value="update">
-                                    <input type="hidden" name="cinema_id" id="edit_cinema_id">
-                                    <div class="form-group">
-                                        <label for="edit_cinema_name">Name</label>
-                                        <input type="text" class="form-control" id="edit_cinema_name" name="name" required>
-                                    </div>
-                                    <div class="form-group">
-                                        <label for="edit_cinema_location">Location</label>
-                                        <input type="text" class="form-control" id="edit_cinema_location" name="location" required>
-                                    </div>
-                                    <div class="form-group">
-                                        <label for="edit_cinema_type_id">Type</label>
-                                        <select class="form-control" id="edit_cinema_type_id" name="type_id" required>
-                                            <?php
-                                            // Re-fetch types for the edit modal
-                                            $result_cinema_types_edit = $conn->query($sql_cinema_types);
-                                            while ($row_type_edit = $result_cinema_types_edit->fetch_assoc()) {
-                                                echo "<option value='" . htmlspecialchars($row_type_edit['type_id']) . "'>" . htmlspecialchars($row_type_edit['type_name']) . "</option>";
-                                            }
-                                            ?>
-                                        </select>
-                                    </div>
-                                </div>
-                                <div class="modal-footer">
-                                    <button type="button" class="btn btn-secondary" data-dismiss="modal">Close</button>
-                                    <button type="submit" class="btn btn-primary">Save Changes</button>
-                                </div>
-                            </form>
-                        </div>
-                    </div>
-                </div>
-
-                <?php if ($active_tab == 'cinema_types'): ?>
-                    <div class="card">
-                        <div class="card-header">
-                            <i class="fas fa-tags"></i> Manage Cinema Types
-                        </div>
-                        <div class="card-body">
-                            <button type="button" class="btn btn-primary mb-3" data-toggle="modal" data-target="#addCinemaTypeModal">
-                                <i class="fas fa-plus"></i> Add New Cinema Type
-                            </button>
-
-                            <div class="table-responsive">
-                                <table class="table table-bordered table-striped">
-                                    <thead>
-                                        <tr>
-                                            <th>ID</th>
-                                            <th>Type Name</th>
-                                            <th>Price (PKR)</th>
-                                            <th>Actions</th>
-                                        </tr>
-                                    </thead>
-                                    <tbody>
-                                        <?php
-                                        $sql_cinema_types_list = "SELECT * FROM cinema_type";
-                                        $result_cinema_types_list = $conn->query($sql_cinema_types_list);
-
-                                        if ($result_cinema_types_list->num_rows > 0) {
-                                            while ($row = $result_cinema_types_list->fetch_assoc()) {
-                                                echo "<tr>";
-                                                echo "<td>" . htmlspecialchars($row['type_id']) . "</td>";
-                                                echo "<td>" . htmlspecialchars($row['type_name']) . "</td>";
-                                                echo "<td>PKR " . number_format($row['price'], 2) . "</td>";
-                                                echo "<td>";
-                                                echo "<button type='button' class='btn btn-sm btn-info btn-action' data-toggle='modal' data-target='#editCinemaTypeModal' " .
-                                                     "data-type_id='" . htmlspecialchars($row['type_id']) . "' " .
-                                                     "data-type_name='" . htmlspecialchars($row['type_name']) . "' " .
-                                                     "data-price='" . htmlspecialchars($row['price']) . "'>" .
-                                                     "<i class='fas fa-edit'></i> Edit</button>";
-                                                echo "<form method='POST' style='display:inline-block;' onsubmit='return confirm(\"Are you sure you want to delete this cinema type?\");'>";
-                                                echo "<input type='hidden' name='cinema_type_action' value='delete'>";
-                                                echo "<input type='hidden' name='type_id' value='" . htmlspecialchars($row['type_id']) . "'>";
-                                                echo "<button type='submit' class='btn btn-sm btn-danger btn-action'><i class='fas fa-trash'></i> Delete</button>";
-                                                echo "</form>";
-                                                echo "</td>";
-                                                echo "</tr>";
-                                            }
-                                        } else {
-                                            echo "<tr><td colspan='4'>No cinema types found.</td></tr>";
-                                        }
-                                        ?>
-                                    </tbody>
-                                </table>
-                            </div>
-                        </div>
-                    </div>
-                <?php endif; ?>
-
-                <div class="modal fade" id="addCinemaTypeModal" tabindex="-1" role="dialog" aria-labelledby="addCinemaTypeModalLabel" aria-hidden="true">
-                    <div class="modal-dialog" role="document">
-                        <div class="modal-content">
-                            <div class="modal-header">
-                                <h5 class="modal-title" id="addCinemaTypeModalLabel">Add New Cinema Type</h5>
-                                <button type="button" class="close" data-dismiss="modal" aria-label="Close">
-                                    <span aria-hidden="true">&times;</span>
-                                </button>
-                            </div>
-                            <form action="admin.php" method="POST">
-                                <div class="modal-body">
-                                    <input type="hidden" name="cinema_type_action" value="add">
-                                    <div class="form-group">
-                                        <label for="add_type_name">Type Name</label>
-                                        <select class="form-control" id="add_type_name" name="type_name" required>
-                                            <option value="Normal">Normal</option>
-                                            <option value="3D">3D</option>
-                                            <option value="IMAX">IMAX</option>
-                                        </select>
-                                    </div>
-                                    <div class="form-group">
-                                        <label for="add_type_price">Price (PKR)</label>
-                                        <input type="number" step="0.01" class="form-control" id="add_type_price" name="price" required>
-                                    </div>
-                                </div>
-                                <div class="modal-footer">
-                                    <button type="button" class="btn btn-secondary" data-dismiss="modal">Close</button>
-                                    <button type="submit" class="btn btn-primary">Add Cinema Type</button>
-                                </div>
-                            </form>
-                        </div>
-                    </div>
-                </div>
-
-                <div class="modal fade" id="editCinemaTypeModal" tabindex="-1" role="dialog" aria-labelledby="editCinemaTypeModalLabel" aria-hidden="true">
-                    <div class="modal-dialog" role="document">
-                        <div class="modal-content">
-                            <div class="modal-header">
-                                <h5 class="modal-title" id="editCinemaTypeModalLabel">Edit Cinema Type</h5>
-                                <button type="button" class="close" data-dismiss="modal" aria-label="Close">
-                                    <span aria-hidden="true">&times;</span>
-                                </button>
-                            </div>
-                            <form action="admin.php" method="POST">
-                                <div class="modal-body">
-                                    <input type="hidden" name="cinema_type_action" value="update">
-                                    <input type="hidden" name="type_id" id="edit_type_id">
-                                    <div class="form-group">
-                                        <label for="edit_type_name">Type Name</label>
-                                        <select class="form-control" id="edit_type_name" name="type_name" required>
-                                            <option value="Normal">Normal</option>
-                                            <option value="3D">3D</option>
-                                            <option value="IMAX">IMAX</option>
-                                        </select>
-                                    </div>
-                                    <div class="form-group">
-                                        <label for="edit_type_price">Price (PKR)</label>
-                                        <input type="number" step="0.01" class="form-control" id="edit_type_price" name="price" required>
-                                    </div>
-                                </div>
-                                <div class="modal-footer">
-                                    <button type="button" class="btn btn-secondary" data-dismiss="modal">Close</button>
-                                    <button type="submit" class="btn btn-primary">Save Changes</button>
-                                </div>
-                            </form>
-                        </div>
-                    </div>
-                </div>
-
-
-                <?php if ($active_tab == 'platforms'): ?>
-                    <div class="card">
-                        <div class="card-header">
-                            <i class="fas fa-tv"></i> Manage Streaming Platforms
-                        </div>
-                        <div class="card-body">
-                            <button type="button" class="btn btn-primary mb-3" data-toggle="modal" data-target="#addPlatformModal">
-                                <i class="fas fa-plus"></i> Add New Platform
-                            </button>
-
-                            <div class="table-responsive">
-                                <table class="table table-bordered table-striped">
-                                    <thead>
-                                        <tr>
-                                            <th>ID</th>
-                                            <th>Platform Name</th>
-                                            <th>Website</th>
-                                            <th>Actions</th>
-                                        </tr>
-                                    </thead>
-                                    <tbody>
-                                        <?php
-                                        $sql_platforms = "SELECT * FROM streaming_platform";
-                                        $result_platforms = $conn->query($sql_platforms);
-
-                                        if ($result_platforms->num_rows > 0) {
-                                            while ($row = $result_platforms->fetch_assoc()) {
-                                                echo "<tr>";
-                                                echo "<td>" . htmlspecialchars($row['platform_id']) . "</td>";
-                                                echo "<td>" . htmlspecialchars($row['platform_name']) . "</td>";
-                                                echo "<td><a href='" . htmlspecialchars($row['website']) . "' target='_blank'>" . htmlspecialchars($row['website']) . "</a></td>";
-                                                echo "<td>";
-                                                echo "<button type='button' class='btn btn-sm btn-info btn-action' data-toggle='modal' data-target='#editPlatformModal' " .
-                                                     "data-platform_id='" . htmlspecialchars($row['platform_id']) . "' " .
-                                                     "data-platform_name='" . htmlspecialchars($row['platform_name']) . "' " .
-                                                     "data-website='" . htmlspecialchars($row['website']) . "'>" .
-                                                     "<i class='fas fa-edit'></i> Edit</button>";
-                                                echo "<form method='POST' style='display:inline-block;' onsubmit='return confirm(\"Are you sure you want to delete this platform?\");'>";
-                                                echo "<input type='hidden' name='platform_action' value='delete'>";
-                                                echo "<input type='hidden' name='platform_id' value='" . htmlspecialchars($row['platform_id']) . "'>";
-                                                echo "<button type='submit' class='btn btn-sm btn-danger btn-action'><i class='fas fa-trash'></i> Delete</button>";
-                                                echo "</form>";
-                                                echo "</td>";
-                                                echo "</tr>";
-                                            }
-                                        } else {
-                                            echo "<tr><td colspan='4'>No streaming platforms found.</td></tr>";
-                                        }
-                                        ?>
-                                    </tbody>
-                                </table>
-                            </div>
-                        </div>
-                    </div>
-                <?php endif; ?>
-
-                <div class="modal fade" id="addPlatformModal" tabindex="-1" role="dialog" aria-labelledby="addPlatformModalLabel" aria-hidden="true">
-                    <div class="modal-dialog" role="document">
-                        <div class="modal-content">
-                            <div class="modal-header">
-                                <h5 class="modal-title" id="addPlatformModalLabel">Add New Streaming Platform</h5>
-                                <button type="button" class="close" data-dismiss="modal" aria-label="Close">
-                                    <span aria-hidden="true">&times;</span>
-                                </button>
-                            </div>
-                            <form action="admin.php" method="POST">
-                                <div class="modal-body">
-                                    <input type="hidden" name="platform_action" value="add">
-                                    <div class="form-group">
-                                        <label for="add_platform_name">Platform Name</label>
-                                        <input type="text" class="form-control" id="add_platform_name" name="platform_name" required>
-                                    </div>
-                                    <div class="form-group">
-                                        <label for="add_website">Website URL</label>
-                                        <input type="url" class="form-control" id="add_website" name="website" placeholder="e.g., https://www.netflix.com" required>
-                                    </div>
-                                </div>
-                                <div class="modal-footer">
-                                    <button type="button" class="btn btn-secondary" data-dismiss="modal">Close</button>
-                                    <button type="submit" class="btn btn-primary">Add Platform</button>
-                                </div>
-                            </form>
-                        </div>
-                    </div>
-                </div>
-
-                <div class="modal fade" id="editPlatformModal" tabindex="-1" role="dialog" aria-labelledby="editPlatformModalLabel" aria-hidden="true">
-                    <div class="modal-dialog" role="document">
-                        <div class="modal-content">
-                            <div class="modal-header">
-                                <h5 class="modal-title" id="editPlatformModalLabel">Edit Streaming Platform</h5>
-                                <button type="button" class="close" data-dismiss="modal" aria-label="Close">
-                                    <span aria-hidden="true">&times;</span>
-                                </button>
-                            </div>
-                            <form action="admin.php" method="POST">
-                                <div class="modal-body">
-                                    <input type="hidden" name="platform_action" value="update">
-                                    <input type="hidden" name="platform_id" id="edit_platform_id">
-                                    <div class="form-group">
-                                        <label for="edit_platform_name">Platform Name</label>
-                                        <input type="text" class="form-control" id="edit_platform_name" name="platform_name" required>
-                                    </div>
-                                    <div class="form-group">
-                                        <label for="edit_website">Website URL</label>
-                                        <input type="url" class="form-control" id="edit_website" name="website" placeholder="e.g., https://www.netflix.com" required>
-                                    </div>
-                                </div>
-                                <div class="modal-footer">
-                                    <button type="button" class="btn btn-secondary" data-dismiss="modal">Close</button>
-                                    <button type="submit" class="btn btn-primary">Save Changes</button>
-                                </div>
-                            </form>
-                        </div>
-                    </div>
-                </div>
-
-
-                <?php if ($active_tab == 'streaming_services'): ?>
-                    <div class="card">
-                        <div class="card-header">
-                            <i class="fas fa-link"></i> Manage Movie Availability on Platforms
-                        </div>
-                        <div class="card-body">
-                            <button type="button" class="btn btn-primary mb-3" data-toggle="modal" data-target="#addStreamingServiceModal">
-                                <i class="fas fa-plus"></i> Add Movie to Platform
-                            </button>
-
-                            <div class="table-responsive">
-                                <table class="table table-bordered table-striped">
-                                    <thead>
-                                        <tr>
-                                            <th>ID</th>
-                                            <th>Movie Title</th>
-                                            <th>Platform Name</th>
-                                            <th>Price (720p)</th>
-                                            <th>Price (1080p)</th>
-                                            <th>Price (4K)</th>
-                                            <th>Actions</th>
-                                        </tr>
-                                    </thead>
-                                    <tbody>
-                                        <?php
-                                        $sql_streaming_services = "SELECT ss.streaming_id, m.title AS movie_title, sp.platform_name, 
-                                                                    ss.movie_id, ss.platform_id,
-                                                                    ss.price_720p, ss.price_1080p, ss.price_4k
-                                                                FROM streaming_services ss
-                                                                JOIN movies m ON ss.movie_id = m.movie_id
-                                                                JOIN streaming_platform sp ON ss.platform_id = sp.platform_id";
-                                        $result_streaming_services = $conn->query($sql_streaming_services);
-
-                                        if ($result_streaming_services->num_rows > 0) {
-                                            while ($row = $result_streaming_services->fetch_assoc()) {
-                                                echo "<tr>";
-                                                echo "<td>" . htmlspecialchars($row['streaming_id']) . "</td>";
-                                                echo "<td>" . htmlspecialchars($row['movie_title']) . "</td>";
-                                                echo "<td>" . htmlspecialchars($row['platform_name']) . "</td>";
-                                                echo "<td>PKR " . number_format($row['price_720p'], 2) . "</td>";
-                                                echo "<td>PKR " . number_format($row['price_1080p'], 2) . "</td>";
-                                                echo "<td>PKR " . number_format($row['price_4k'], 2) . "</td>";
-                                                echo "<td>";
-                                                echo "<button type='button' class='btn btn-sm btn-info btn-action' data-toggle='modal' data-target='#editStreamingServiceModal' " .
-                                                     "data-streaming_id='" . htmlspecialchars($row['streaming_id']) . "' " .
-                                                     "data-movie_id='" . htmlspecialchars($row['movie_id']) . "' " .
-                                                     "data-platform_id='" . htmlspecialchars($row['platform_id']) . "' " .
-                                                     "data-price_720p='" . htmlspecialchars($row['price_720p']) . "' " .
-                                                     "data-price_1080p='" . htmlspecialchars($row['price_1080p']) . "' " .
-                                                     "data-price_4k='" . htmlspecialchars($row['price_4k']) . "'>" .
-                                                     "<i class='fas fa-edit'></i> Edit</button>";
-                                                echo "<form method='POST' style='display:inline-block;' onsubmit='return confirm(\"Are you sure you want to delete this streaming service link?\");'>";
-                                                echo "<input type='hidden' name='streaming_service_action' value='delete'>";
-                                                echo "<input type='hidden' name='streaming_id' value='" . htmlspecialchars($row['streaming_id']) . "'>";
-                                                echo "<button type='submit' class='btn btn-sm btn-danger btn-action'><i class='fas fa-trash'></i> Delete</button>";
-                                                echo "</form>";
-                                                echo "</td>";
-                                                echo "</tr>";
-                                            }
-                                        } else {
-                                            echo "<tr><td colspan='7'>No movie availability links found.</td></tr>";
-                                        }
-                                        ?>
-                                    </tbody>
-                                </table>
-                            </div>
-                        </div>
-                    </div>
-                <?php endif; ?>
-
-                <div class="modal fade" id="addStreamingServiceModal" tabindex="-1" role="dialog" aria-labelledby="addStreamingServiceModalLabel" aria-hidden="true">
-                    <div class="modal-dialog" role="document">
-                        <div class="modal-content">
-                            <div class="modal-header">
-                                <h5 class="modal-title" id="addStreamingServiceModalLabel">Add Movie to Platform</h5>
-                                <button type="button" class="close" data-dismiss="modal" aria-label="Close">
-                                    <span aria-hidden="true">&times;</span>
-                                </button>
-                            </div>
-                            <form action="admin.php" method="POST">
-                                <div class="modal-body">
-                                    <input type="hidden" name="streaming_service_action" value="add">
-                                    <div class="form-group">
-                                        <label for="add_ss_movie_id">Movie</label>
-                                        <select class="form-control" id="add_ss_movie_id" name="movie_id" required>
-                                            <?php
-                                            $sql_all_movies = "SELECT movie_id, title FROM movies ORDER BY title ASC";
-                                            $result_all_movies = $conn->query($sql_all_movies);
-                                            while ($row_movie = $result_all_movies->fetch_assoc()) {
-                                                echo "<option value='" . htmlspecialchars($row_movie['movie_id']) . "'>" . htmlspecialchars($row_movie['title']) . "</option>";
-                                            }
-                                            ?>
-                                        </select>
-                                    </div>
-                                    <div class="form-group">
-                                        <label for="add_ss_platform_id">Platform</label>
-                                        <select class="form-control" id="add_ss_platform_id" name="platform_id" required>
-                                            <?php
-                                            $sql_all_platforms = "SELECT platform_id, platform_name FROM streaming_platform ORDER BY platform_name ASC";
-                                            $result_all_platforms = $conn->query($sql_all_platforms);
-                                            while ($row_platform = $result_all_platforms->fetch_assoc()) {
-                                                echo "<option value='" . htmlspecialchars($row_platform['platform_id']) . "'>" . htmlspecialchars($row_platform['platform_name']) . "</option>";
-                                            }
-                                            ?>
-                                        </select>
-                                    </div>
-                                    <div class="form-group">
-                                        <label for="add_price_720p">Price (720p)</label>
-                                        <input type="number" step="0.01" class="form-control" id="add_price_720p" name="price_720p" required>
-                                    </div>
-                                    <div class="form-group">
-                                        <label for="add_price_1080p">Price (1080p)</label>
-                                        <input type="number" step="0.01" class="form-control" id="add_price_1080p" name="price_1080p" required>
-                                    </div>
-                                    <div class="form-group">
-                                        <label for="add_price_4k">Price (4K)</label>
-                                        <input type="number" step="0.01" class="form-control" id="add_price_4k" name="price_4k" required>
-                                    </div>
-                                </div>
-                                <div class="modal-footer">
-                                    <button type="button" class="btn btn-secondary" data-dismiss="modal">Close</button>
-                                    <button type="submit" class="btn btn-primary">Add Link</button>
-                                </div>
-                            </form>
-                        </div>
-                    </div>
-                </div>
-
-                <div class="modal fade" id="editStreamingServiceModal" tabindex="-1" role="dialog" aria-labelledby="editStreamingServiceModalLabel" aria-hidden="true">
-                    <div class="modal-dialog" role="document">
-                        <div class="modal-content">
-                            <div class="modal-header">
-                                <h5 class="modal-title" id="editStreamingServiceModalLabel">Edit Movie Availability</h5>
-                                <button type="button" class="close" data-dismiss="modal" aria-label="Close">
-                                    <span aria-hidden="true">&times;</span>
-                                </button>
-                            </div>
-                            <form action="admin.php" method="POST">
-                                <div class="modal-body">
-                                    <input type="hidden" name="streaming_service_action" value="update">
-                                    <input type="hidden" name="streaming_id" id="edit_ss_streaming_id">
-                                    <div class="form-group">
-                                        <label for="edit_ss_movie_id">Movie</label>
-                                        <select class="form-control" id="edit_ss_movie_id" name="movie_id" required>
-                                            <?php
-                                            // Re-fetch all movies for edit modal
-                                            $result_all_movies_edit = $conn->query($sql_all_movies);
-                                            while ($row_movie_edit = $result_all_movies_edit->fetch_assoc()) {
-                                                echo "<option value='" . htmlspecialchars($row_movie_edit['movie_id']) . "'>" . htmlspecialchars($row_movie_edit['title']) . "</option>";
-                                            }
-                                            ?>
-                                        </select>
-                                    </div>
-                                    <div class="form-group">
-                                        <label for="edit_ss_platform_id">Platform</label>
-                                        <select class="form-control" id="edit_ss_platform_id" name="platform_id" required>
-                                            <?php
-                                            // Re-fetch all platforms for edit modal
-                                            $result_all_platforms_edit = $conn->query($sql_all_platforms);
-                                            while ($row_platform_edit = $result_all_platforms_edit->fetch_assoc()) {
-                                                echo "<option value='" . htmlspecialchars($row_platform_edit['platform_id']) . "'>" . htmlspecialchars($row_platform_edit['platform_name']) . "</option>";
-                                            }
-                                            ?>
-                                        </select>
-                                    </div>
-                                    <div class="form-group">
-                                        <label for="edit_price_720p">Price (720p)</label>
-                                        <input type="number" step="0.01" class="form-control" id="edit_price_720p" name="price_720p" required>
-                                    </div>
-                                    <div class="form-group">
-                                        <label for="edit_price_1080p">Price (1080p)</label>
-                                        <input type="number" step="0.01" class="form-control" id="edit_price_1080p" name="price_1080p" required>
-                                    </div>
-                                    <div class="form-group">
-                                        <label for="edit_price_4k">Price (4K)</label>
-                                        <input type="number" step="0.01" class="form-control" id="edit_price_4k" name="price_4k" required>
-                                    </div>
-                                </div>
-                                <div class="modal-footer">
-                                    <button type="button" class="btn btn-secondary" data-dismiss="modal">Close</button>
-                                    <button type="submit" class="btn btn-primary">Save Changes</button>
-                                </div>
-                            </form>
-                        </div>
-                    </div>
-                </div>
-
-            </main>
+                <button type="submit"
+                        class="w-full flex justify-center py-2 px-4 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
+                    Update Movie
+                </button>
+            </form>
         </div>
     </div>
 
-    <script src="https://code.jquery.com/jquery-3.5.1.slim.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/popper.js@1.16.1/dist/umd/popper.min.js"></script>
-    <script src="https://stackpath.bootstrapcdn.com/bootstrap/4.5.2/js/bootstrap.min.js"></script>
+    <div id="editCinemaModal" class="modal">
+        <div class="modal-content">
+            <span class="close-button" onclick="closeModal('editCinemaModal')">&times;</span>
+            <h3 class="text-2xl font-bold text-gray-800 mb-4">Edit Cinema</h3>
+            <form action="admin.php" method="POST" class="space-y-4">
+                <input type="hidden" name="action" value="update_cinema">
+                <input type="hidden" name="tab" value="cinemas"> <input type="hidden" name="cinema_id" id="edit_cinema_id">
+
+                <div>
+                    <label for="edit_cinema_name" class="block text-sm font-medium text-gray-700">Cinema Name:</label>
+                    <input type="text" id="edit_cinema_name" name="name" required
+                           class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm">
+                </div>
+                <div>
+                    <label for="edit_cinema_location" class="block text-sm font-medium text-gray-700">Location:</label>
+                    <input type="text" id="edit_cinema_location" name="location" required
+                           class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm">
+                </div>
+                <div>
+                    <label for="edit_cinema_type_id" class="block text-sm font-medium text-gray-700">Cinema Type:</label>
+                    <select id="edit_cinema_type_id" name="type_id" required
+                            class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm">
+                        <?php foreach ($cinema_types as $type): ?>
+                            <option value="<?php echo htmlspecialchars($type['type_id']); ?>"><?php echo htmlspecialchars($type['type_name']); ?> (PKR <?php echo htmlspecialchars(number_format($type['price'], 2)); ?>)</option>
+                        <?php endforeach; ?>
+                    </select>
+                </div>
+                <button type="submit"
+                        class="w-full flex justify-center py-2 px-4 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
+                    Update Cinema
+                </button>
+            </form>
+        </div>
+    </div>
+
+    <div id="editPlatformModal" class="modal">
+        <div class="modal-content">
+            <span class="close-button" onclick="closeModal('editPlatformModal')">&times;</span>
+            <h3 class="text-2xl font-bold text-gray-800 mb-4">Edit Streaming Platform</h3>
+            <form action="admin.php" method="POST" class="space-y-4">
+                <input type="hidden" name="action" value="update_platform">
+                <input type="hidden" name="tab" value="platforms"> <input type="hidden" name="platform_id" id="edit_platform_id">
+
+                <div>
+                    <label for="edit_platform_name" class="block text-sm font-medium text-gray-700">Platform Name:</label>
+                    <input type="text" id="edit_platform_name" name="platform_name" required
+                           class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm">
+                </div>
+                <div>
+                    <label for="edit_platform_website" class="block text-sm font-medium text-gray-700">Website URL:</label>
+                    <input type="url" id="edit_platform_website" name="website" placeholder="e.g., https://www.example.com"
+                           class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm">
+                </div>
+                <button type="submit"
+                        class="w-full flex justify-center py-2 px-4 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
+                    Update Platform
+                </button>
+            </form>
+        </div>
+    </div>
+
+    <div id="editStreamingServiceModal" class="modal">
+        <div class="modal-content">
+            <span class="close-button" onclick="closeModal('editStreamingServiceModal')">&times;</span>
+            <h3 class="text-2xl font-bold text-gray-800 mb-4">Edit Movie-Platform Link</h3>
+            <form action="admin.php" method="POST" class="space-y-4">
+                <input type="hidden" name="action" value="update_streaming_service">
+                <input type="hidden" name="tab" value="streaming_services"> <input type="hidden" name="streaming_id" id="edit_streaming_id">
+
+                <div>
+                    <label for="edit_service_movie_id" class="block text-sm font-medium text-gray-700">Movie:</label>
+                    <select id="edit_service_movie_id" name="movie_id" required
+                            class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm">
+                        <?php foreach ($movies as $movie): ?>
+                            <option value="<?php echo htmlspecialchars($movie['movie_id']); ?>"><?php echo htmlspecialchars($movie['title']); ?></option>
+                        <?php endforeach; ?>
+                    </select>
+                </div>
+                <div>
+                    <label for="edit_service_platform_id" class="block text-sm font-medium text-gray-700">Streaming Platform:</label>
+                    <select id="edit_service_platform_id" name="platform_id" required
+                            class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm">
+                        <?php foreach ($platforms as $platform): ?>
+                            <option value="<?php echo htmlspecialchars($platform['platform_id']); ?>"><?php echo htmlspecialchars($platform['platform_name']); ?></option>
+                        <?php endforeach; ?>
+                    </select>
+                </div>
+                <div>
+                    <label for="edit_service_price_720p" class="block text-sm font-medium text-gray-700">Price (720p):</label>
+                    <input type="number" step="0.01" min="0" id="edit_service_price_720p" name="price_720p" required
+                           class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm">
+                </div>
+                <div>
+                    <label for="edit_service_price_1080p" class="block text-sm font-medium text-gray-700">Price (1080p):</label>
+                    <input type="number" step="0.01" min="0" id="edit_service_price_1080p" name="price_1080p" required
+                           class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm">
+                </div>
+                <div>
+                    <label for="edit_service_price_4k" class="block text-sm font-medium text-gray-700">Price (4K):</label>
+                    <input type="number" step="0.01" min="0" id="edit_service_price_4k" name="price_4k" required
+                           class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm">
+                </div>
+                <button type="submit"
+                        class="w-full flex justify-center py-2 px-4 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
+                    Update Link
+                </button>
+            </form>
+        </div>
+    </div>
+
 
     <script>
-        // JavaScript for populating Edit Movie Modal
-        $('#editMovieModal').on('show.bs.modal', function (event) {
-            var button = $(event.relatedTarget); // Button that triggered the modal
-            var movie_id = button.data('movie_id');
-            var title = button.data('title');
-            var genre = button.data('genre');
-            var release_date = button.data('release_date');
-            var language = button.data('language');
-            var duration = button.data('duration');
-            var rating = button.data('rating');
+        // Tab functionality
+        function openTab(tabName) {
+            var i, tabContent, tabButtons;
+            tabContent = document.getElementsByClassName('tab-content');
+            for (i = 0; i < tabContent.length; i++) {
+                tabContent[i].classList.remove('active');
+            }
+            tabButtons = document.getElementsByClassName('tab-button');
+            for (i = 0; i < tabButtons.length; i++) {
+                tabButtons[i].classList.remove('active');
+            }
+            document.getElementById(tabName).classList.add('active');
+            event.currentTarget.classList.add('active');
 
-            var modal = $(this);
-            modal.find('#edit_movie_id').val(movie_id);
-            modal.find('#edit_title').val(title);
-            modal.find('#edit_genre').val(genre);
-            modal.find('#edit_release_date').val(release_date);
-            modal.find('#edit_language').val(language);
-            modal.find('#edit_duration').val(duration);
-            modal.find('#edit_rating').val(rating);
+            // Update URL hash to remember active tab
+            history.replaceState(null, null, `admin.php?tab=${tabName}`);
+        }
+
+        // Set active tab on page load based on URL hash or default
+        document.addEventListener('DOMContentLoaded', function() {
+            const urlParams = new URLSearchParams(window.location.search);
+            const tabFromUrl = urlParams.get('tab');
+            if (tabFromUrl) {
+                const targetTab = document.getElementById(tabFromUrl);
+                const targetButton = document.querySelector(`.tab-button[onclick*="${tabFromUrl}"]`);
+                if (targetTab && targetButton) {
+                    // Remove active from all first
+                    document.querySelectorAll('.tab-content').forEach(el => el.classList.remove('active'));
+                    document.querySelectorAll('.tab-button').forEach(el => el.classList.remove('active'));
+
+                    targetTab.classList.add('active');
+                    targetButton.classList.add('active');
+                }
+            } else {
+                // Fallback to default if no tab in URL
+                document.getElementById('movies').classList.add('active');
+                document.querySelector('.tab-button[onclick*="movies"]').classList.add('active');
+            }
         });
 
-        // JavaScript for populating Edit Cinema Modal
-        $('#editCinemaModal').on('show.bs.modal', function (event) {
-            var button = $(event.relatedTarget);
-            var cinema_id = button.data('cinema_id');
-            var name = button.data('name');
-            var location = button.data('location');
-            var type_id = button.data('type_id'); // Get the type_id
 
-            var modal = $(this);
-            modal.find('#edit_cinema_id').val(cinema_id);
-            modal.find('#edit_cinema_name').val(name);
-            modal.find('#edit_cinema_location').val(location);
-            modal.find('#edit_cinema_type_id').val(type_id); // Set the selected option
-        });
+        // Modals Functions
+        function closeModal(modalId) {
+            document.getElementById(modalId).style.display = 'none';
+        }
 
-        // JavaScript for populating Edit Cinema Type Modal
-        $('#editCinemaTypeModal').on('show.bs.modal', function (event) {
-            var button = $(event.relatedTarget);
-            var type_id = button.data('type_id');
-            var type_name = button.data('type_name');
-            var price = button.data('price');
+        window.onclick = function(event) {
+            if (event.target.classList.contains('modal')) {
+                event.target.style.display = 'none';
+            }
+        }
 
-            var modal = $(this);
-            modal.find('#edit_type_id').val(type_id);
-            modal.find('#edit_type_name').val(type_name); // Set the selected option
-            modal.find('#edit_type_price').val(price);
-        });
+        // Movie Edit Modal
+        function openEditMovieModal(movie) {
+            document.getElementById('edit_movie_id').value = movie.movie_id;
+            document.getElementById('edit_movie_title').value = movie.title;
+            document.getElementById('edit_movie_genre').value = movie.genre;
+            document.getElementById('edit_movie_release_date').value = movie.release_date;
+            document.getElementById('edit_movie_language').value = movie.language;
+            document.getElementById('edit_movie_duration').value = movie.duration;
+            document.getElementById('edit_movie_rating').value = movie.rating;
+            document.getElementById('editMovieModal').style.display = 'flex';
+        }
 
-        // JavaScript for populating Edit Platform Modal
-        $('#editPlatformModal').on('show.bs.modal', function (event) {
-            var button = $(event.relatedTarget);
-            var platform_id = button.data('platform_id');
-            var platform_name = button.data('platform_name');
-            var website = button.data('website');
+        // Cinema Edit Modal
+        function openEditCinemaModal(cinema) {
+            document.getElementById('edit_cinema_id').value = cinema.cinema_id;
+            document.getElementById('edit_cinema_name').value = cinema.name;
+            document.getElementById('edit_cinema_location').value = cinema.location;
+            document.getElementById('edit_cinema_type_id').value = cinema.type_id; // Set selected option
+            document.getElementById('editCinemaModal').style.display = 'flex';
+        }
 
-            var modal = $(this);
-            modal.find('#edit_platform_id').val(platform_id);
-            modal.find('#edit_platform_name').val(platform_name);
-            modal.find('#edit_website').val(website);
-        });
+        // Platform Edit Modal
+        function openEditPlatformModal(platform) {
+            document.getElementById('edit_platform_id').value = platform.platform_id;
+            document.getElementById('edit_platform_name').value = platform.platform_name;
+            document.getElementById('edit_platform_website').value = platform.website;
+            document.getElementById('editPlatformModal').style.display = 'flex';
+        }
 
-        // JavaScript for populating Edit Streaming Service Modal
-        $('#editStreamingServiceModal').on('show.bs.modal', function (event) {
-            var button = $(event.relatedTarget);
-            var streaming_id = button.data('streaming_id');
-            var movie_id = button.data('movie_id');
-            var platform_id = button.data('platform_id');
-            var price_720p = button.data('price_720p');
-            var price_1080p = button.data('price_1080p');
-            var price_4k = button.data('price_4k');
+        // Streaming Service Edit Modal
+        function openEditStreamingServiceModal(service) {
+            document.getElementById('edit_streaming_id').value = service.streaming_id;
+            document.getElementById('edit_service_movie_id').value = service.movie_id;
+            document.getElementById('edit_service_platform_id').value = service.platform_id;
+            document.getElementById('edit_service_price_720p').value = service.price_720p;
+            document.getElementById('edit_service_price_1080p').value = service.price_1080p;
+            document.getElementById('edit_service_price_4k').value = service.price_4k;
+            document.getElementById('editStreamingServiceModal').style.display = 'flex';
+        }
 
-            var modal = $(this);
-            modal.find('#edit_ss_streaming_id').val(streaming_id);
-            modal.find('#edit_ss_movie_id').val(movie_id); // Set selected option
-            modal.find('#edit_ss_platform_id').val(platform_id); // Set selected option
-            modal.find('#edit_price_720p').val(price_720p);
-            modal.find('#edit_price_1080p').val(price_1080p);
-            modal.find('#edit_price_4k').val(price_4k);
-        });
+        // Delete Confirmation
+        function confirmDelete(entityType, id) {
+            if (confirm(`Are you sure you want to delete this ${entityType} (ID: ${id})? This action cannot be undone.`)) {
+                // Create a form dynamically to send a POST request for deletion
+                const form = document.createElement('form');
+                form.method = 'POST';
+                form.action = 'admin.php';
+
+                const actionInput = document.createElement('input');
+                actionInput.type = 'hidden';
+                actionInput.name = 'action';
+                actionInput.value = `delete_${entityType}`;
+                form.appendChild(actionInput);
+
+                const idInput = document.createElement('input');
+                idInput.type = 'hidden';
+                idInput.name = `${entityType}_id`;
+                idInput.value = id;
+                form.appendChild(idInput);
+
+                // Add a hidden input for the current active tab to redirect back correctly
+                const tabInput = document.createElement('input');
+                tabInput.type = 'hidden';
+                tabInput.name = 'tab';
+                tabInput.value = document.querySelector('.tab-button.active').onclick.toString().match(/'([^']+)'/)[1];
+                form.appendChild(tabInput);
+
+                document.body.appendChild(form);
+                form.submit();
+            }
+        }
     </script>
 </body>
 </html>
-<?php
-$conn->close();
-?>

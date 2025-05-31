@@ -53,11 +53,12 @@ if ($result_platforms) {
 
 // --- Fetch User Recommendations (Activity Log) ---
 $recommendations = [];
+// Assuming recommendations table has user_id and movie_id, joining with movies table
 $sql_recommendations = "SELECT r.reason, m.title AS movie_title, m.genre, m.release_date, m.language
                         FROM recommendations r
                         JOIN movies m ON r.movie_id = m.movie_id
                         WHERE r.user_id = ?
-                        ORDER BY r.recommendation_id DESC LIMIT 5";
+                        ORDER BY r.recommendation_id DESC LIMIT 5"; // Show latest 5 recommendations
 $stmt_recommendations = $conn->prepare($sql_recommendations);
 if ($stmt_recommendations) {
     $stmt_recommendations->bind_param("i", $user_id);
@@ -259,7 +260,7 @@ $conn->close();
                                     <td><?php echo htmlspecialchars($platform['platform_name']); ?></td>
                                     <td><a href="<?php echo htmlspecialchars($platform['website']); ?>" target="_blank" class="btn btn-blue">Visit Site</a></td>
                                     <td>
-                                        <a href="viewer_movies_on_platform.php?platform_id=<?php echo htmlspecialchars($platform['platform_id']); ?>" class="btn btn-green">View Movies</a>
+                                        <a href="viewer_movies_on_platform_placeholder.php?platform_id=<?php echo htmlspecialchars($platform['platform_id']); ?>" class="btn btn-green">View Movies</a>
                                     </td>
                                 </tr>
                             <?php endforeach; ?>
